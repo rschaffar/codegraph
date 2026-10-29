@@ -1,11 +1,12 @@
 # Local Review Board: design and implementation plan
 
-Status: agreed product direction; implementation not started.
+Status: interactive sample-data clickdummy implemented; live-index board and
+persistence not started.
 
 This is a deliberate local extension of `codegraph ui`, not a replacement for
-Map, Symbol, Flow, Screens or Steps. The source-built Nix package is already
-available; this document describes the next feature, not functionality that
-ships in that package today.
+Map, Symbol, Flow, Screens or Steps. The source-built Nix package carries the
+isolated clickdummy at `/board-prototype.html`; the production functionality
+planned below does not ship yet.
 
 ## Design authority and reuse
 
@@ -178,6 +179,30 @@ or Git operations. Exported identities and paths may still be private project
 information; exporting is explicit, not network publication.
 
 ## Implementation sequence
+
+### 0. Interaction clickdummy (implemented; review before live integration)
+
+`ui/board-prototype.html` is a separate entry that mounts neither the live App
+nor its graph adapter. It uses ten synthetic classes, source snippets, a cycle
+and an explicitly labelled interface bridge. Nothing is persisted. It reuses
+Svelte Flow, kind glyphs, SourceBlock and the viewer theme, and is pruned from
+the reusable UI library package.
+
+Open `/board-prototype.html` on the source-built viewer server. For development
+without any project index:
+
+```bash
+nix develop -c npm ci --ignore-scripts
+nix develop -c bash -c 'cd ui && node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 5176 --strictPort'
+# Open http://127.0.0.1:5176/board-prototype.html
+```
+
+Review selection/promotion, context filtering, dragging, method expansion,
+edge-evidence comparison and multiple movable/resizable source cards before
+implementing the real data projection. Use the prototype to revise interactions;
+do not treat its hard-coded positions, fixture graph or display counts as a
+production graph/layout implementation. Its HTTP packaging and model tests do
+not substitute for actual browser interaction checks.
 
 ### 1. Read-only component projection and evidence
 

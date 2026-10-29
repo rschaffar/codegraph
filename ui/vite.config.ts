@@ -29,6 +29,21 @@ export default defineConfig(({ command }) => {
     // survives being opened from the filesystem or mounted under a sub-path.
     base: './',
     build: {
+      // The isolated clickdummy shares fonts/theme/renderer, but never mounts
+      // the live reader or asks its API for project data.
+      rollupOptions: {
+        input: {
+          viewer: fileURLToPath(new URL('./index.html', import.meta.url)),
+          boardPrototype: fileURLToPath(new URL('./board-prototype.html', import.meta.url)),
+        },
+        // Keep Flow's portal action and its re-exports together across the two
+        // entries; splitting that library produces a circular chunk dependency.
+        output: {
+          manualChunks(id) {
+            return id.includes('/@xyflow/') ? 'graph' : undefined;
+          },
+        },
+      },
       // Scoped to dist/viewer — `emptyOutDir` must never be allowed to widen
       // to dist/, which holds the compiled engine tsc wrote moments earlier.
       outDir,

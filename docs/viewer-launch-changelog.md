@@ -15,6 +15,8 @@ These describe `codegraph ui` and its screens. They were taken out of `## [Unrel
 
 ## New Features
 
+- A local Review Board clickdummy at `/board-prototype.html` lets reviewers try component selection, dragging, method expansion and side-by-side source cards with clearly labelled synthetic data and no saved state.
+
 - **The Steps tab draws what an Angular screen does.** Each handler a template binds is drawn with the event that fires it, like `submitForm` on the form's `(ngSubmit)` or `toggleFavorite` on a button's `(click)`, followed by the requests it sends and the screen it opens. That includes handlers in child components the screen renders. Re-index Angular projects after upgrading.
 
 - **The Screens tab draws Angular apps.** Every screen in an Angular app's routes, with the navigation between them: `router.navigate(…)`, a guard's redirect and each template's `routerLink`, under the condition the code checks first. A button in a child component, like an article's favorite button, is drawn from the screen that renders it. A layout's tabs and buttons are drawn from every screen inside that layout. Re-index Angular projects after upgrading.

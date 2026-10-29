@@ -103,8 +103,10 @@ rule does **not** apply to this new view. Do not remove or constrain the board t
 satisfy that rule. Existing Map, Symbol, Flow and other reader views keep their
 contracts. Reuse their graph APIs, source/highlight/drift handling, theme,
 navigation and renderer wherever suitable; the exception does not relax security,
-read-only semantics or truthful graph evidence. The board is planned, not yet
-implemented; do not describe the Nix packaging commit as delivering the feature.
+read-only semantics or truthful graph evidence. The isolated sample-data
+clickdummy at `ui/board-prototype.html` is implemented; the live-index board and
+persistence remain planned. Keep the prototype out of the reusable UI package,
+and do not describe it or the Nix packaging commit as delivering the full feature.
 
 ### NodeKind / EdgeKind
 
