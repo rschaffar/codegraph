@@ -15,7 +15,7 @@ These describe `codegraph ui` and its screens. They were taken out of `## [Unrel
 
 ## New Features
 
-- A local Review Board lets you select indexed symbols, explicitly follow typed connections, compare movable source cards and save named arrangements without changing source or Git state.
+- A local Review Board lets you preview folders and namespaces, choose symbols and typed connections, explore nested members, follow links between movable source cards and save named arrangements without changing source or Git state.
 
 - A local Review Board clickdummy at `/board-prototype.html` lets reviewers explore every symbol and relationship kind, explicitly add connected targets, restore hidden items and compare movable source cards using clearly labelled synthetic data with no saved state.
 
@@ -55,7 +55,7 @@ These describe `codegraph ui` and its screens. They were taken out of `## [Unrel
 
   Run `codegraph ui` in an indexed project, or `codegraph ui /path/to/project` for one indexed elsewhere (`codegraph web` is an alias). It takes port 4747, or the next free one; `--port <n>` pins a specific port and `--no-open` just prints the URL for a headless box or an SSH session. Set `CODEGRAPH_BROWSER=<command>` to choose the browser, or `CODEGRAPH_BROWSER=none` to never open one.
 
-  The viewer listens on `127.0.0.1` only, so nothing on your network can reach it, and requests claiming to come from any other host are refused. It opens an index that already exists, never creates one, and never changes your graph or a line of your code — the one thing it writes is a trail you asked it to save (see below), and `--read-only` turns even that off. It sends nothing anywhere.
+  The viewer listens on `127.0.0.1` only, so nothing on your network can reach it, and requests claiming to come from any other host are refused. It opens an index that already exists, never creates one, and never changes your graph or a line of your code — the only things it writes are trails and Review Board arrangements you explicitly save, and `--read-only` turns even those off. It sends nothing anywhere.
 
 - **A map of the whole project, in `codegraph ui`.** The Map tab draws your repository at module granularity — one box per directory — with dependencies pointing down, so the top of the picture is what runs first and the bottom is what everything else stands on. Nothing is placed by hand and nothing floats: a module sits one layer above whatever it depends on, line weight is how many calls, imports and type references cross the link, and the same project always draws the same picture. Hover a link for what crosses it, including the busiest symbol pairs behind the weight; click a module to isolate its links, list its dependencies and dependents with counts, and jump straight into one of its files.
 
@@ -121,7 +121,7 @@ These describe `codegraph ui` and its screens. They were taken out of `## [Unrel
 
   A saved trail survives your project changing. Each step is remembered by what it is — its qualified name, its kind, the file it was in — rather than by where it sat, so editing the file above a function doesn't lose it. When something does move, the trail says so on its own row: which step moved to another file, which one was renamed or deleted, and which part of the walk still opens. It never quietly stitches over a missing step, because a trail is a path and a step that skips one would show a call that doesn't exist.
 
-  Trails are plain JSON, one file per trail, under `.codegraph/ui/trails/` — already ignored by git, so they stay yours by default. **Export** hands you the file if you'd rather commit one for the team. This is the only thing the viewer writes: it still never indexes, never changes your graph, and never touches a line of your code. Start it with `codegraph ui --read-only` and it won't write even that — saved trails can still be opened, just not saved or deleted.
+  Trails are plain JSON, one file per trail, under `.codegraph/ui/trails/` — already ignored by git, so they stay yours by default. **Export** hands you the file if you'd rather commit one for the team. Saved trails and Review Board arrangements are the only metadata the viewer writes: it still never indexes, never changes your graph, and never touches a line of your code. Start it with `codegraph ui --read-only` and it won't write even that — saved trails can still be opened, just not saved or deleted.
 
 ## Fixes
 

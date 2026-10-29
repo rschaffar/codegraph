@@ -7,7 +7,8 @@ One source tree, two builds.
   loopback.
 - **The library** — the same components, packaged with `svelte-package` into
   `dist/` as `@colbymchenry/codegraph-ui`, so a host (CodeGraph Pro) renders
-  the Symbol view, the Flow strip and the Map over its **own** graph reads.
+  the Symbol view, Flow strip, Map and optional Review Board over its **own**
+  graph reads.
 
 They are one tree on purpose. A forked component is a second answer to the same
 question about the same graph, and sooner or later the two get quoted against
@@ -62,7 +63,7 @@ build so that mistake cannot land twice.
 </CodegraphUi>
 ```
 
-Exports: `SymbolView`, `FlowStrip`, `ArchitectureMap`, `FileView`,
+Exports: `SymbolView`, `FlowStrip`, `ArchitectureMap`, `ReviewBoardView`, `FileView`,
 `FileSourceView`, `EntryPointsView`, `DeadCodeView`, `TypeHierarchy`, `TrailBar`,
 `SavedTrails`, `SearchPalette`, `PalettePanel`, `PaletteRows`, `DriftBanner`,
 `KindGlyph`, `ExportButtons`, `CodegraphUi` — plus every pure model function the screens are
@@ -93,15 +94,26 @@ interface GraphAdapter {
   deadCode(request?, signal?): Promise<WireDeadCode>;
   trails(signal?): Promise<WireTrails>;
 
-  // The only mutating pair, and the only optional methods besides `events`.
+  // All writes and all Board capabilities are optional.
   saveTrail?(request, signal?): Promise<WireTrails>;
   deleteTrail?(id, signal?): Promise<WireTrails>;
+  board?(ids, signal?, filters?): Promise<BoardSnapshot>;
+  boardSearch?(request, signal?): Promise<BoardSearch>;
+  boardGroups?(request, signal?): Promise<BoardGroups>;
+  boardMembers?(request, signal?): Promise<BoardMembers>;
+  boardConnections?(request, signal?): Promise<BoardConnections>;
+  boardEvidence?(request, signal?): Promise<BoardEvidencePage>;
+  boards?(signal?): Promise<BoardList>;
+  loadBoard?(id, signal?): Promise<BoardLoaded>;
+  resolveBoard?(document, signal?): Promise<BoardLoaded>; // in-memory read, not a write
+  saveBoard?(request, signal?): Promise<BoardSaved>;
+  deleteBoard?(id, signal?): Promise<{ deleted: string }>;
   events?(handlers): () => void;   // optional: the live channel
 }
 ```
 
 The shapes are exactly what `src/ui-server/api/` serialises, and they live in
-`src/lib/wire.ts` — no imports, no runtime — so a host can depend on the
+`src/lib/wire.ts` and `src/lib/board-wire.ts` — types only — so a host can depend on the
 vocabulary without depending on the viewer. The default implementation,
 `createHttpAdapter()`, is the loopback JSON API; a host that already holds the
 index implements the same thirteen required methods against its own reads and
@@ -114,13 +126,37 @@ that learns about a sync some other way calls `live.signal('index')` instead,
 which is the same code path the stream uses.
 
 `saveTrail` / `deleteTrail` are optional for a different reason: they are the
-only methods in the interface that CHANGE anything, and a host must be able to
+trail-writing methods in the interface, and a host must be able to
 render the reader without inheriting a write it never asked for. Omit them and
 `TrailBar` grows no Save button and `SavedTrails` says the host does not store
 them — the same thing it does when `trails()` answers `readOnly: true`, which is
 how a host that *can* store them declines a particular project. `trails()` itself
 is required: a host with nowhere to keep them answers an empty read-only list, so
 the screen is explained rather than silently missing.
+
+### Optional Review Board
+
+`ReviewBoardView` reuses the same adapter, theme and source/drift facilities. Its
+interactive view needs `board`, `boardSearch` and `boardConnections`; groups,
+direct-member paging, evidence paging and persistence extend it independently.
+A reader-only host need not implement any of them. Missing operations are
+explained or disabled rather than causing hidden network access. A persistence
+host supplies `boards` with its explicit `readOnly` decision; only `saveBoard`
+and `deleteBoard` write Board metadata, never source, the index or Git.
+
+The Board wire types and `createBoardModel`/`edgeLaneMap` are exported from the
+package root. `scopeIds` is eligible projection membership, whereas `symbols`
+may also carry ancestor/identity context; hosts must not treat that context as
+canvas inclusion. Direct member pages carry their own eligible IDs and totals.
+Test/generated/uncertainty filters default to false, preserving selected cards.
+Neither generated source text nor graph snapshots belong in `BoardDocument`.
+
+Reader **Add to board** shortcuts use the memory-only `boardRequests` handoff
+and `addToBoard(ids)`. A custom navigation driver can implement optional
+`boardHref()`; omitting it preserves `#/board`. A custom Board consumer drains
+`boardRequests.take()` once and explicitly includes just those IDs. The standalone
+viewer retains unsaved Board state while navigating reader tabs. The separate
+synthetic clickdummy and its fixtures are never part of this library.
 
 ### Three things that will bite
 
@@ -229,6 +265,7 @@ Mono, so the code grid survives and only the letterforms change.
 | `#/file/<path>?hl=<line>` | file view — outline in source order |
 | `#/file/<path>?src=1` | file view — the whole file's source, with ports and call arcs |
 | `#/map?root=&depth=&tests=1` | module map |
+| `#/board` | explicit single-project Review Board; metadata saves only when allowed |
 | `#/flow?from=&to=` | flow strip — the call path between two symbols |
 | `#/flow?symbols=a,b,c` | flow strip — `codegraph_explore`'s own question |
 | `#/flow?t=<trail>` | flow strip — the trail you walked, read as a flow |

@@ -47,7 +47,7 @@ import type {
 } from './wire';
 
 import type { BoardSnapshot, BoardSearchRequest, BoardSearch, BoardConnectionRequest, BoardConnections, BoardEvidencePage,
-  BoardList, BoardLoaded, BoardSaved, BoardDocument, SaveBoardRequest } from './board-wire';
+  BoardList, BoardLoaded, BoardSaved, BoardDocument, SaveBoardRequest, BoardFilters, BoardGroups, BoardGroupRequest, BoardMembers, BoardMemberRequest } from './board-wire';
 
 /* ---------------------------------------------------------------- errors -- */
 
@@ -204,12 +204,14 @@ export interface StepsRequest {
  * whole-file view), `entryPoints` (where a reader starts), `deadCode` (where
  * nobody goes) and `trails` (the walks the reader kept).
  *
- * Everything here answers a question except `saveTrail`/`deleteTrail`, which
- * are optional for exactly that reason.
+ * Everything here answers a question except the explicit trail/Board metadata
+ * writes, which are optional for exactly that reason.
  */
 export interface GraphAdapter {
   /** Optional selected-subgraph Board capabilities; existing hosts remain compatible. */
-  board?(ids: readonly string[], signal?: AbortSignal): Promise<BoardSnapshot>;
+  board?(ids: readonly string[], signal?: AbortSignal, filters?: BoardFilters): Promise<BoardSnapshot>;
+  boardGroups?(request: BoardGroupRequest, signal?: AbortSignal): Promise<BoardGroups>;
+  boardMembers?(request: BoardMemberRequest, signal?: AbortSignal): Promise<BoardMembers>;
   boardSearch?(request: BoardSearchRequest, signal?: AbortSignal): Promise<BoardSearch>;
   boardConnections?(request: BoardConnectionRequest, signal?: AbortSignal): Promise<BoardConnections>;
   boardEvidence?(request: BoardConnectionRequest, signal?: AbortSignal): Promise<BoardEvidencePage>;
@@ -293,7 +295,7 @@ function encodePath(value: string): string {
   return value.split('/').map(encodeURIComponent).join('/');
 }
 
-function boardParams(request: BoardSearchRequest | BoardConnectionRequest): URLSearchParams {
+function boardParams(request: BoardSearchRequest | BoardConnectionRequest | BoardGroupRequest | BoardMemberRequest | BoardFilters): URLSearchParams {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(request)) if (value !== undefined) params.set(key, typeof value === 'boolean' ? (value ? '1' : '0') : String(value));
   return params;
@@ -374,7 +376,9 @@ export function createHttpAdapter(options: HttpAdapterOptions = {}): GraphAdapte
   }
 
   return {
-    board: (ids, signal) => getJson<BoardSnapshot>(`api/board${query(new URLSearchParams({ ids: JSON.stringify(ids) }))}`, signal),
+    board: (ids, signal, filters = {}) => { const params = boardParams(filters); params.set('ids', JSON.stringify(ids)); return getJson<BoardSnapshot>(`api/board${query(params)}`, signal); },
+    boardGroups: (request, signal) => getJson<BoardGroups>(`api/board/groups${query(boardParams(request))}`, signal),
+    boardMembers: (request, signal) => getJson<BoardMembers>(`api/board/members${query(boardParams(request))}`, signal),
     boardSearch: (request, signal) => getJson<BoardSearch>(`api/board/search${query(boardParams(request))}`, signal),
     boardConnections: (request, signal) => getJson<BoardConnections>(`api/board/connections${query(boardParams(request))}`, signal),
     boardEvidence: (request, signal) => getJson<BoardEvidencePage>(`api/board/evidence${query(boardParams(request))}`, signal),

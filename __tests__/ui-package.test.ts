@@ -24,6 +24,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   ArchitectureMap,
+  ReviewBoardView,
+  createBoardModel,
   CodegraphUi,
   FlowStrip,
   SearchPalette,
@@ -447,6 +449,9 @@ beforeAll(() => {
   globals.requestAnimationFrame ??= (fn: FrameRequestCallback) =>
     setTimeout(() => fn(0), 0) as unknown as number;
   globals.cancelAnimationFrame ??= (handle: number) => clearTimeout(handle);
+  // jsdom has no CSS matrix implementation. These are adapter/state tests at
+  // identity scale; real zoom, port geometry and movement run in Chromium.
+  (window as unknown as Record<string, unknown>).DOMMatrixReadOnly ??= class { readonly m22 = 1; };
   // jsdom's own `matchMedia` is a stub that is not callable here, and Svelte's
   // `MediaQuery` (which `@xyflow/svelte`'s store constructs eagerly) calls it
   // the moment a canvas mounts. Replace it outright rather than guarding.
@@ -615,6 +620,48 @@ describe('@colbymchenry/codegraph-ui — a host renders the package', () => {
 
     await render(SearchPalette, {});
     expect(host.querySelector('input[role="combobox"]')).not.toBeNull();
+  });
+
+  it('exports the reusable Board and pure model while keeping old reader-only hosts valid', async () => {
+    const { adapter, calls } = mockAdapter(); setGraphAdapter(adapter);
+    expect(createBoardModel([], []).projectBoard([], [], []).symbols).toEqual([]);
+    await render(ReviewBoardView, {});
+    expect(host.textContent).toContain('This host does not provide Review Board graph queries.');
+    expect(calls).toEqual([]);
+  });
+
+  it('offers newly observed kinds and retains an exact future-kind filter on an empty page', async () => {
+    const { adapter } = mockAdapter(); const seed = { ...nodeRef(), id: 'future:seed', kind: 'future_symbol', name: 'seed', qualifiedName: 'seed' };
+    const peer = { ...nodeRef(), id: 'future:peer', kind: 'future_symbol', name: 'peer', qualifiedName: 'peer' }; let empty = false;
+    adapter.board = async () => ({ symbols: [seed], relations: [], included: [seed.id], missing: [], bounded: false, notes: [], nodeKinds: [], edgeKinds: [] });
+    adapter.boardSearch = async () => ({ items: [seed], total: 1, nextOffset: null, bounded: false });
+    adapter.boardConnections = async () => ({ scope: seed, direction: 'outgoing', withMembers: false, symbols: [seed, peer], items: empty ? [] : [{ target: peer, evidence: [{ id: 'future-edge', source: seed.id, target: peer.id, kind: 'future_link' }], total: 1 }], total: empty ? 0 : 1, nextOffset: null, bounded: false, notes: [] });
+    setGraphAdapter(adapter); await render(ReviewBoardView, {});
+    const settle = async () => { await new Promise((resolve) => setTimeout(resolve, 0)); flushSync(); };
+    const button = (name: string) => [...host.querySelectorAll('button')].find((item) => (item.getAttribute('aria-label') ?? item.textContent) === name)!;
+    button('+ Add symbols').click(); await settle();
+    expect(host.querySelector('option[value="future_symbol"]')).not.toBeNull();
+    button('Add seed').click(); await settle(); button('Close symbol library').click(); await settle();
+    button('Connections for seed').click(); await settle();
+    const select = host.querySelector<HTMLSelectElement>('[aria-label="Connection relationship filter"]')!;
+    expect(select.querySelector('option[value="future_link"]')).not.toBeNull();
+    select.value = 'future_link'; select.dispatchEvent(new Event('change', { bubbles: true })); await settle();
+    empty = true; button('Incoming').click(); await settle();
+    expect(select.value).toBe('future_link'); expect(select.querySelector('option[value="future_link"]')).not.toBeNull();
+  });
+
+  it('keeps absent optional Board operations disabled even on a writable metadata host', async () => {
+    const { adapter } = mockAdapter();
+    adapter.board = async () => ({ symbols: [], relations: [], included: [], missing: [], bounded: false, notes: [], nodeKinds: [], edgeKinds: [] });
+    adapter.boardSearch = async () => ({ items: [], total: 0, nextOffset: null, bounded: false });
+    adapter.boardConnections = async () => ({ scope: nodeRef(), direction: 'outgoing', withMembers: false, symbols: [], items: [], total: 0, nextOffset: null, bounded: false, notes: [] });
+    adapter.boards = async () => ({ boards: [{ id: 'saved', name: 'Saved example', updatedAt: 'now' }], readOnly: false, readOnlyReason: null, directory: '.codegraph/ui/boards', skipped: 0, bounded: false });
+    adapter.saveBoard = async () => ({ id: 'saved', name: 'Saved example', updatedAt: 'now' });
+    setGraphAdapter(adapter); await render(ReviewBoardView, {});
+    const button = (name: string) => [...host.querySelectorAll('button')].find((item) => item.textContent === name)!;
+    expect(button('Refresh index').disabled).toBe(true);
+    button('Saved boards').click(); await new Promise((resolve) => setTimeout(resolve, 0)); flushSync();
+    expect(button('Open Saved example').disabled).toBe(true); expect(button('Delete').disabled).toBe(true);
   });
 
   it('offers no Save when the adapter cannot write, and says why in the list', async () => {

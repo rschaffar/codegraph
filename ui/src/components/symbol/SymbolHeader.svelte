@@ -11,6 +11,8 @@
 <script lang="ts">
   import KindGlyph from '../KindGlyph.svelte';
   import { fileHref } from '../../lib/navigation';
+  import { getGraphAdapter } from '../../lib/adapter';
+  import { addToBoard } from '../../lib/board-requests.svelte';
   import { kindPhrase, plural } from '../../lib/symbol-model';
   import type {
     WireNodeDetail,
@@ -94,6 +96,9 @@
     <a href={fileHref(node.file, { line: node.line })}>{node.file}</a>:{node.line}–{node.endLine}
     · {plural(node.lines, 'line')}
   </span>
+  {#if getGraphAdapter().board}
+    <button type="button" class="board-add" onkeydown={(event) => event.stopPropagation()} onclick={() => addToBoard([node.id])}>Add to board</button>
+  {/if}
 </div>
 
 {#if payload.ancestors.length > 0}
@@ -189,6 +194,15 @@
   .loc a:hover {
     text-decoration: underline;
   }
+
+  .board-add {
+    border: 1px solid var(--rule-soft);
+    padding: 3px 7px;
+    color: var(--accent);
+    font-size: 11.5px;
+  }
+
+  .board-add:hover { border-color: var(--accent); }
 
   .parents {
     margin-top: 6px;

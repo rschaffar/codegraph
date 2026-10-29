@@ -8,9 +8,10 @@
   import KindGlyph from '../KindGlyph.svelte';
   import { getGraphAdapter } from '../../lib/adapter';
   import { cardFamily, edgeKinds, nodeKinds, kindLabel, relationLabel } from '../../lib/board-catalog';
-  import { createBoardModel, nextCodePosition, nextSymbolPosition, type BoardSymbol, type BoardEvidence, type BoardRelation, type SymbolAction, type SymbolData, type SourceCardData } from '../../lib/board-model';
-  import type { BoardDocument, BoardLoaded, BoardList, BoardSearch, BoardConnections, BoardConnectionRequest } from '../../lib/board-wire';
+  import { createBoardModel, edgeLaneMap, mergeBoardFacts, isBoardEvidenceUncertain, BOARD_MEMBER_REVEAL_LIMIT, nextCodePosition, nextSymbolPosition, type BoardMemberPageState, type BoardSymbol, type BoardEvidence, type BoardRelation, type SymbolAction, type SymbolData, type SourceCardData } from '../../lib/board-model';
+  import type { BoardSnapshot, BoardDocument, BoardLoaded, BoardList, BoardSearch, BoardConnections, BoardConnectionRequest, BoardGroups } from '../../lib/board-wire';
   import { live } from '../../lib/live.svelte';
+  import { boardRequests } from '../../lib/board-requests.svelte';
 
   const adapter = getGraphAdapter();
   const { fitView } = useSvelteFlow();
@@ -26,11 +27,24 @@
   let nodes = $state<BoardNode[]>([]);
   let viewport = $state({ x: 0, y: 0, zoom: 1 });
   let selected = $state<string | null>(null);
+  let selectedSources = $state<string[]>([]);
   let locatedMember = $state<string | undefined>();
   let panel = $state<'library' | 'connections' | 'hidden' | 'boards' | null>(null);
   let evidence = $state<BoardRelation | null>(null);
   let kind = $state('');
   let structure = $state(false);
+  let includeTests = $state(false);
+  let includeGenerated = $state(false);
+  let includeUncertain = $state(false);
+  let excluded = $state<BoardSnapshot['excluded']>();
+  let libraryMode = $state<'symbols' | 'folder' | 'namespace'>('symbols');
+  let groupQuery = $state('');
+  let groupPage = $state<BoardGroups | null>(null);
+  let activeGroup = $state<Parameters<NonNullable<typeof adapter.boardGroups>>[0] | null>(null);
+  let groupBusy = $state(false);
+  let libraryNamespace = $state('');
+  let namespaceName = $state('');
+  let helpOpen = $state(false);
   let notes = $state<string[]>([]);
   let error = $state('');
   let busy = $state(false);
@@ -47,6 +61,10 @@
   let searchPage = $state<BoardSearch | null>(null);
   let searchSelection = $state<string[]>([]);
   let searchBusy = $state(false);
+  let activeSearch = $state<Parameters<NonNullable<typeof adapter.boardSearch>>[0] | null>(null);
+  let activeConnection = $state<BoardConnectionRequest | null>(null);
+  let memberPages = $state<Record<string, BoardMemberPageState>>({});
+  let memberGeneration = 0;
   let connectionScope = $state<string | null>(null);
   let direction = $state<'incoming' | 'outgoing'>('outgoing');
   let withMembers = $state(true);
@@ -55,26 +73,33 @@
   let connectionPage = $state<BoardConnections | null>(null);
   let connectionBusy = $state(false);
   let connectionSelection = $state<string[]>([]);
-  type HistoryEntry = { id: string; direction: 'incoming' | 'outgoing'; members: boolean; kind: string; query: string; page: BoardConnections | null; selected: string[]; scroll: number };
+  type HistoryEntry = { id: string; direction: 'incoming' | 'outgoing'; members: boolean; kind: string; query: string; page: BoardConnections | null; selected: string[]; scroll: number; criteria: BoardConnectionRequest | null };
   let history = $state<HistoryEntry[]>([]);
+  let pendingEvidence = $state<Record<string, number>>({});
   let importFile = $state<HTMLInputElement>(null!);
+  let boardElement = $state<HTMLDivElement>(null!);
+  let returnFocus: HTMLElement | null = null;
   const positions = new Map<string, { x: number; y: number }>();
+  let snapshotIds = new Set<string>();
+  let eligibleIds = $state<ReadonlySet<string>>(new Set());
   const sourceHeights = new Map<string, number>();
   const originalIdentities = new Map<string, BoardDocument['symbols'][number]['identity']>();
-  let request = 0; let searchRequest = 0; let connectionRequest = 0; let zIndex = 10; let epoch = 0; let saveEpoch = 0; let saveRequest = 0;
+  let request = 0; let searchRequest = 0; let connectionRequest = $state(0); let groupRequest = 0; let zIndex = 10; let epoch = 0; let saveEpoch = 0; let saveRequest = 0;
   const model = $derived(createBoardModel(symbols, relations));
-  const projection = $derived(model.projectBoard(included, hidden, expanded, kind, structure, limits));
+  const filters = $derived({ tests: includeTests, generated: includeGenerated, uncertain: includeUncertain });
+  const projection = $derived(model.projectBoard(included, hidden, expanded, kind, structure, limits, { ...filters, locatedMember, memberPages, eligibleIds }));
+  const lanes = $derived(edgeLaneMap(projection.edges));
+  const related = $derived(model.sourceSelection(selectedSources, included, hidden));
   const lastHidden = $derived([...hideHistory].reverse().find((id) => hidden.includes(id)));
   const codeCount = $derived(nodes.filter((node) => node.type === 'code').length);
   const dirty = $derived(savedFingerprint !== fingerprint());
   const readOnly = $derived(boardList?.readOnly !== false || !adapter.saveBoard);
-  const allNodeKinds = $derived([...new Set([...nodeKinds, ...symbols.map((item) => item.kind)])]);
-  const allEdgeKinds = $derived([...new Set([...edgeKinds, ...relations.map((item) => item.kind)])]);
+  const allNodeKinds = $derived([...new Set([...nodeKinds, ...symbols.map((item) => item.kind), ...(groupPage?.items ?? []).flatMap((item) => item.byKind.map((entry) => entry.kind)), ...(libraryKind ? [libraryKind] : [])])]);
+  const allEdgeKinds = $derived([...new Set([...edgeKinds, ...relations.map((item) => item.kind), ...(connectionPage?.items ?? []).flatMap((item) => item.evidence.map((edge) => edge.kind)), ...(kind ? [kind] : []), ...(connectionKind ? [connectionKind] : [])])]);
   const edges = $derived<Edge[]>(projection.edges.map((edge) => {
-    const same = projection.edges.filter((item) => item.source === edge.source && item.target === edge.target);
-    const lane = edge.source === edge.target ? 320 + same.indexOf(edge) * 48 : (same.indexOf(edge) - (same.length - 1) / 2) * 56;
-    const hot = evidence?.id === edge.id || selected === edge.source || selected === edge.target;
-    const uncertain = edge.evidence.some((item) => (item.confidence ?? 1) < 0.6);
+    const lane = lanes.get(edge.id) ?? 0;
+    const hot = evidence?.id === edge.id || (selectedSources.length ? edge.evidence.some((item) => related.evidenceIds.has(item.id)) : selected === edge.source || selected === edge.target);
+    const uncertain = edge.evidence.some(isBoardEvidenceUncertain);
     return { id: edge.id, source: edge.source, target: edge.target, sourceHandle: edge.sourceHandle, targetHandle: edge.targetHandle,
       type: 'relation', data: { relation: edge, lane }, label: `${relationLabel(edge.kind)}${edge.evidence.length > 1 ? ` · ${edge.evidence.length}` : ''}${edge.via ? ' · synthesized' : ''}${uncertain ? ' · uncertain' : ''}`,
       markerEnd: { type: MarkerType.ArrowClosed, color: hot ? 'var(--accent)' : 'var(--ink-3)' },
@@ -82,11 +107,29 @@
       labelStyle: 'color:var(--ink-2);font:10px var(--mono);background:var(--paper);padding:4px 5px', interactionWidth: 20 };
   }));
   function merge(items: BoardSymbol[]) {
-    const map = new Map(symbols.map((item) => [item.id, item]));
-    for (const item of items) map.set(item.id, { ...map.get(item.id), ...item });
-    symbols = [...map.values()];
+    const keep = new Set([...snapshotIds, ...included, ...expanded, ...hidden,
+      ...nodes.filter((node) => node.type === 'code').map((node) => node.data.symbolId),
+      ...projection.symbols.flatMap((item) => item.memberRows.map((row) => row.symbol.id)),
+      ...(searchPage?.items ?? []).map((item) => item.id), ...(connectionPage?.symbols ?? []).map((item) => item.id)]);
+    symbols = mergeBoardFacts(symbols, items, keep);
+  }
+  function setPanel(next: typeof panel) {
+    if (!panel && document.activeElement instanceof HTMLElement) returnFocus = document.activeElement;
+    panel = next; evidence = null;
+    if (next) void tick().then(() => boardElement?.querySelector<HTMLElement>('aside input:not([type=checkbox]), aside h2, aside button')?.focus());
+  }
+  function closePanel() {
+    panel = null; evidence = null;
+    void tick().then(() => { if (returnFocus?.isConnected) returnFocus.focus(); else boardElement?.querySelector<HTMLElement>('[data-add-symbols]')?.focus(); });
   }
   function display(id: string) { return symbols.find((item) => item.id === id)?.qualifiedName ?? id; }
+  function exclusionLabel(value?: BoardSnapshot['excluded']): string {
+    if (!value) return '';
+    return (['symbols', 'relations'] as const).map((unit) => {
+      const counts = value[unit];
+      return counts.tests + counts.generated + counts.uncertain ? `${unit}: ${counts.tests} test, ${counts.generated} generated, ${counts.uncertain} uncertain` : '';
+    }).filter(Boolean).join(' · ');
+  }
   function fail(cause: unknown) { error = cause instanceof Error ? cause.message : String(cause); }
   function refresh() {
     for (const node of nodes) if (node.type === 'symbol') positions.set(node.id, { ...node.position });
@@ -99,106 +142,252 @@
       const position = old?.position ?? positions.get(item.symbol.id) ?? nextSymbolPosition(occupied, { x: 30 + (graph.length % 3) * 400, y: 30 });
       occupied.push({ position, width: 286, height: old?.measured?.height ?? 240 });
       graph.push({ ...old, id: item.symbol.id, type: 'symbol', position, dragHandle: '.board-drag-handle', connectable: false,
-        data: { ...item, hidden, pinned: included.filter((id) => !hidden.includes(id)), expanded: expanded.includes(item.symbol.id), locatedMember, act } });
+        data: { ...item, hidden, pinned: included.filter((id) => !hidden.includes(id)), expanded: expanded.includes(item.symbol.id), locatedMember, canPinMembers: true, related: related.representatives.has(item.symbol.id), relatedIds: related.members, act } });
     }
-    nodes = [...graph, ...nodes.filter((node) => node.type === 'code')];
+    nodes = [...graph, ...nodes.filter((node) => node.type === 'code').map((node) => node.type === 'code' ? { ...node, data: { ...node.data, filters, follow: followSource, resize: resizeCard } } : node)];
+  }
+  function reflectSourceSelection(items: readonly Node[]) {
+    const ids = items.filter((item) => item.type === 'code').map((item) => String(item.data.symbolId));
+    if (JSON.stringify(ids) !== JSON.stringify(selectedSources)) { selectedSources = ids; refresh(); }
   }
   async function loadSnapshot(fit = false) {
     if (!adapter.board) return;
     const current = ++request; error = ''; busy = true;
     try {
-      const value = await adapter.board(included.filter((id) => !id.startsWith('missing:')));
+      const value = await adapter.board(included.filter((id) => !id.startsWith('missing:')), undefined, filters);
       if (current !== request) return;
-      merge(value.symbols); relations = value.relations; notes = value.notes;
+      snapshotIds = new Set(value.symbols.map((item) => item.id)); eligibleIds = new Set(value.scopeIds ?? snapshotIds); merge(value.symbols); relations = value.relations; notes = value.notes; excluded = value.excluded;
       if (value.missing.length) notes = [...notes, `${value.missing.length} selected identities no longer resolve. Reload/open the saved board to re-resolve them.`];
-      refresh(); if (fit) await fitGraph();
+      refresh();
+      // Viewport animations may be interrupted by normal pointer input. Their
+      // completion must never hold the request/save controls in a busy state.
+      if (fit) void fitGraph().catch((cause) => { if (current === request) fail(cause); });
     } catch (cause) { if (current === request) fail(cause); }
     finally { if (current === request) busy = false; }
   }
   async function add(ids: string[]) {
+    const firstSelection = included.length === 0;
     const unique = [...new Set([...included, ...ids])];
-    if (new Set([...unique, ...nodes.filter((node) => node.type === 'code').map((node) => node.data.symbolId)]).size > 128) { error = 'A board can retain at most 128 symbol identities including source cards. Narrow the selection first.'; return; }
+    if (new Set([...unique, ...expanded, ...hidden, ...nodes.filter((node) => node.type === 'code').map((node) => node.data.symbolId)]).size > 128) { error = 'A board can retain at most 128 symbol identities including source cards. Narrow the selection first.'; return; }
     included = unique; hidden = hidden.filter((id) => !ids.includes(id)); evidence = null;
     searchSelection = searchSelection.filter((id) => !ids.includes(id)); connectionSelection = [];
-    await loadSnapshot(included.length === ids.length);
+    await loadSnapshot(firstSelection);
     notice = `${ids.length} chosen symbol(s) included. No neighbours added. Existing positions preserved.`;
+    if (panel === 'hidden') void tick().then(() => boardElement.querySelector<HTMLElement>('aside h2, aside button')?.focus());
+  }
+  async function restoreHidden(ids: string[]) {
+    hidden = hidden.filter((id) => !ids.includes(id)); await loadSnapshot();
+    notice = 'Restored previous placement/visibility preferences without pinning new symbols; active filters still apply.';
+  }
+  async function includeTargets(ids: string[]) {
+    const states = ids.map((id) => ({ id, ...model.targetState(id, included, hidden) }));
+    hidden = hidden.filter((id) => !states.some((item) => item.status === 'hidden' && item.representative === id));
+    const additions = states.filter((item) => item.status === 'absent').map((item) => item.id);
+    if (additions.length) await add(additions); else await loadSnapshot();
+    connectionSelection = [];
   }
   async function targetAction(id: string) {
     const state = model.targetState(id, included, hidden);
     if (state.status === 'visible') await locate(id);
-    else await add([state.status === 'hidden' ? state.representative : id]);
+    else if (state.status === 'hidden') await restoreHidden([state.representative]);
+    else await add([id]);
   }
   function choose(values: string[], id: string, checked: boolean) { return checked ? [...new Set([...values, id])] : values.filter((item) => item !== id); }
   async function fitGraph() { await tick(); await fitView({ nodes: nodes.filter((node) => node.type === 'symbol'), padding: 0.16, maxZoom: 1, duration: 200 }); }
   async function fitCode() { await tick(); await fitView({ nodes: nodes.filter((node) => node.type === 'code'), padding: 0.14, maxZoom: 1, duration: 200 }); }
+  async function fitSelection() {
+    const selection = nodes.filter((node) => node.selected);
+    if (!selection.length) { notice = 'Select cards by their headers (Shift for several), then Fit selection.'; return; }
+    await tick(); await fitView({ nodes: selection, padding: 0.25, maxZoom: 1.1, duration: 200 });
+  }
   async function locate(id: string) {
     const state = model.targetState(id, included, hidden); if (state.status !== 'visible') return;
-    const owner = state.representative; locatedMember = model.memberOf(id, owner) ?? undefined;
-    if (owner !== id) { expanded = [...new Set([...expanded, owner])]; limits = { ...limits, [owner]: model.children(owner).length }; }
+    const owner = state.representative;
+    const reveal = model.revealMember(id, owner, expanded, limits);
+    if (new Set([...included, ...hidden, ...expanded, ...reveal.expanded, ...nodes.filter((node) => node.type === 'code').map((node) => node.data.symbolId)]).size > 128) { error = 'Locating this path would exceed the 128 retained-identity limit. Collapse or remove another selection first.'; return; }
+    expanded = reveal.expanded; limits = reveal.limits; locatedMember = reveal.locatedMember;
+    for (const parent of reveal.path.slice(0, -1)) await ensureMembers(parent, limits[parent] ?? 6);
     selected = owner; refresh(); nodes = nodes.map((node) => ({ ...node, selected: node.id === owner }));
     await tick(); await fitView({ nodes: [{ id: owner }], padding: 0.5, maxZoom: 1, duration: 200 });
-    notice = owner === id ? `Located ${display(id)}.` : `${display(id)} is folded in ${display(owner)}${locatedMember && locatedMember !== id ? ` → ${display(locatedMember)}` : ''}. Containing row highlighted; Pin separately for an exact card.`;
+    await tick(); boardElement?.querySelector<HTMLElement>(`[data-member="${CSS.escape(id)}"] button.member-name`)?.focus();
+    notice = owner === id ? `Located ${display(id)}.` : `Located exact member: ${reveal.path.map(display).join(' → ')}.`;
   }
   function act(action: SymbolAction, id: string) {
     error = ''; evidence = null;
     if (action === 'connections') void openConnections(id);
-    else if (action === 'restore') void add([id]);
+    else if (action === 'contents') void openConnections(id, { members: false, kind: 'contains' });
+    else if (action === 'restore') void restoreHidden([id]);
+    else if (action === 'pin') void add([id]);
     else if (action === 'hide') {
+      if (new Set([...included, ...expanded, ...hidden, ...nodes.filter((node) => node.type === 'code').map((node) => node.data.symbolId), id]).size > 128) { error = 'The board already retains 128 identities; remove an existing selection before retaining another hidden member.'; return; }
       hidden = [...new Set([...hidden, id])]; hideHistory = [...hideHistory.filter((item) => item !== id), id]; selected = null; refresh(); notice = `${display(id)} hidden. Undo hide or restore from Connections/Hidden items.`;
+      void tick().then(() => boardElement.querySelector<HTMLElement>('[data-hidden-items]')?.focus());
     } else if (action === 'expand' || action === 'more') {
-      if (action === 'expand') expanded = expanded.includes(id) ? expanded.filter((item) => item !== id) : [...expanded, id];
-      else limits = { ...limits, [id]: (limits[id] ?? 6) + 6 };
+      if (action === 'expand') {
+        if (expanded.includes(id)) expanded = expanded.filter((item) => item !== id);
+        else {
+          if (new Set([...included, ...expanded, ...hidden, ...nodes.filter((node) => node.type === 'code').map((node) => node.data.symbolId), id]).size > 128) { error = 'The board already retains 128 identities. Collapse or remove another selection before retaining nested expansion state.'; return; }
+          expanded = [...expanded, id]; void ensureMembers(id, limits[id] ?? 6);
+        }
+      } else {
+        const desired = Math.min(BOARD_MEMBER_REVEAL_LIMIT, (limits[id] ?? 6) + 6);
+        limits = { ...limits, [id]: desired }; void ensureMembers(id, desired);
+        if (desired === BOARD_MEMBER_REVEAL_LIMIT) notice = `Outline capped at ${BOARD_MEMBER_REVEAL_LIMIT} eligible rows. Use Connections → contains for the remaining members.`;
+      }
       refresh();
-      if (model.children(id).length < (symbols.find((item) => item.id === id)?.memberCount ?? 0)) notice = 'The loaded member scope is bounded. Browse Connections → contains to page the full indexed contents and pin individual members.';
+      if ((action === 'more' || expanded.includes(id)) && (limits[id] ?? 6) < BOARD_MEMBER_REVEAL_LIMIT) notice = 'Member detail changed without moving cards. Pan or Fit graph if the longer outline extends beyond the viewport.';
     } else if (action === 'locate') void locate(id);
     else openCode(id);
   }
-  function connectionArgs(offset = 0): BoardConnectionRequest { return { id: connectionScope!, direction, members: withMembers, kind: connectionKind || undefined, q: connectionQ || undefined, offset }; }
-  async function loadConnections(offset = 0) {
+  function connectionArgs(offset = 0): BoardConnectionRequest { return { id: connectionScope!, direction, members: withMembers, kind: connectionKind || undefined, q: connectionQ || undefined, offset, ...filters }; }
+  async function loadConnections(offset = 0, paging = false) {
     if (!adapter.boardConnections || !connectionScope) return;
-    const current = ++connectionRequest; connectionBusy = true; error = '';
+    const current = ++connectionRequest; connectionBusy = true; error = ''; pendingEvidence = {};
     try {
-      const value = await adapter.boardConnections(connectionArgs(offset));
+      const criteria = paging && activeConnection ? { ...activeConnection, offset } : connectionArgs(offset);
+      const value = await adapter.boardConnections(criteria);
       if (current !== connectionRequest) return;
       merge([value.scope, ...value.symbols, ...value.items.flatMap((row) => row.owner ? [row.target, row.owner] : [row.target])]);
-      connectionPage = offset && connectionPage ? { ...value, items: [...connectionPage.items, ...value.items] } : value;
+      activeConnection = { ...criteria }; connectionPage = value;
+      notice = `Connections: showing ${offset + (value.items.length ? 1 : 0)}–${offset + value.items.length} of ${value.total} targets. Selection is retained across pages.`;
+      if (paging) void tick().then(() => { boardElement.querySelector<HTMLElement>('.connections-panel h2')?.focus(); const list = boardElement.querySelector('.connections-panel .result-list'); if (list) list.scrollTop = 0; });
     } catch (cause) { if (current === connectionRequest) fail(cause); }
     finally { if (current === connectionRequest) connectionBusy = false; }
   }
-  async function openConnections(id: string) {
-    if (panel === 'connections' && connectionScope) history = [...history, { id: connectionScope, direction, members: withMembers, kind: connectionKind, query: connectionQ, page: connectionPage, selected: [...connectionSelection], scroll: document.querySelector('.connections-panel .result-list')?.scrollTop ?? 0 }];
+  async function openConnections(id: string, options: { members?: boolean; kind?: string } = {}) {
+    if (panel === 'connections' && connectionScope) history = [...history.slice(-9), { id: connectionScope, direction, members: withMembers, kind: connectionKind, query: connectionQ, page: connectionPage, selected: [...connectionSelection], scroll: boardElement.querySelector('.connections-panel .result-list')?.scrollTop ?? 0, criteria: activeConnection ? { ...activeConnection } : null }];
     else history = [];
-    connectionScope = id; direction = 'outgoing'; withMembers = cardFamily(model.symbol(id).kind) === 'type' || model.symbol(id).kind === 'component';
-    connectionKind = ''; connectionQ = ''; connectionSelection = []; connectionPage = null; panel = 'connections'; evidence = null;
+    connectionScope = id; direction = 'outgoing'; withMembers = options.members ?? (cardFamily(model.symbol(id).kind) === 'type' || model.symbol(id).kind === 'component');
+    connectionKind = options.kind ?? ''; connectionQ = ''; connectionSelection = []; connectionPage = null; setPanel('connections');
     await loadConnections();
   }
   async function backConnections() {
     const entry = history.at(-1); if (!entry) return;
     ++connectionRequest; history = history.slice(0, -1); connectionScope = entry.id; direction = entry.direction; withMembers = entry.members;
     connectionKind = entry.kind; connectionQ = entry.query; connectionPage = entry.page; connectionSelection = entry.selected; connectionBusy = false;
-    await tick(); const list = document.querySelector('.connections-panel .result-list'); if (list) list.scrollTop = entry.scroll;
+    activeConnection = entry.criteria; pendingEvidence = {};
+    if (entry.page) merge(entry.page.symbols);
+    await tick(); boardElement.querySelector<HTMLElement>('.connections-panel h2')?.focus();
+    const list = boardElement.querySelector('.connections-panel .result-list'); if (list) list.scrollTop = entry.scroll;
   }
   async function moreEvidence(target: string, offset: number) {
-    if (!adapter.boardEvidence || !connectionPage) return;
+    if (!adapter.boardEvidence || !connectionPage || pendingEvidence[target] === connectionRequest) return;
     const current = connectionRequest;
+    pendingEvidence = { ...pendingEvidence, [target]: current };
     try {
-      const value = await adapter.boardEvidence({ ...connectionArgs(offset), target });
+      const value = await adapter.boardEvidence({ ...(activeConnection ?? connectionArgs()), offset, target });
       if (current !== connectionRequest || !connectionPage) return;
       merge(value.symbols);
-      connectionPage = { ...connectionPage, items: connectionPage.items.map((row) => row.target.id === target ? { ...row, evidence: [...row.evidence, ...value.items] } : row) };
+      connectionPage = { ...connectionPage, items: connectionPage.items.map((row) => row.target.id === target ? { ...row, evidence: [...new Map([...row.evidence, ...value.items].map((edge) => [edge.id, edge])).values()] } : row) };
+    } catch (cause) { if (current === connectionRequest) fail(cause); }
+    finally { if (pendingEvidence[target] === current) { const rest = { ...pendingEvidence }; delete rest[target]; pendingEvidence = rest; } }
+  }
+  async function changeFilters() {
+    ++memberGeneration; memberPages = {}; connectionSelection = []; searchSelection = []; history = [];
+    await loadSnapshot();
+    if (panel === 'library') { if (libraryMode === 'symbols') await search(); else await groups(); }
+    if (panel === 'connections') await loadConnections();
+  }
+  async function groups(offset = 0, paging = false) {
+    if (!adapter.boardGroups || libraryMode === 'symbols') return;
+    const current = ++groupRequest; groupBusy = true; error = '';
+    try {
+      const criteria = paging && activeGroup ? { ...activeGroup, offset } : { type: libraryMode, q: groupQuery, offset, limit: 30, ...filters };
+      const value = await adapter.boardGroups(criteria);
+      if (current === groupRequest) {
+        activeGroup = criteria; groupPage = value;
+        if (paging) void tick().then(() => { boardElement.querySelector<HTMLElement>('.library h2')?.focus(); const list = boardElement.querySelector('.library .result-list'); if (list) list.scrollTop = 0; });
+      }
+    } catch (cause) { if (current === groupRequest) fail(cause); } finally { if (current === groupRequest) groupBusy = false; }
+  }
+  async function browseGroup(item: BoardGroups['items'][number]) {
+    libraryPath = item.type === 'folder' ? item.path ?? item.id : '';
+    libraryNamespace = item.type === 'namespace' ? item.namespace ?? item.id : '';
+    namespaceName = item.type === 'namespace' ? item.name : '';
+    libraryQ = ''; libraryMode = 'symbols'; searchPage = null; activeSearch = null; await search();
+    void tick().then(() => boardElement.querySelector<HTMLElement>('[aria-label="Search indexed symbols"]')?.focus());
+  }
+  async function addAllMatches() {
+    if (!adapter.boardSearch || !searchPage || !activeSearch || searchPage.total > 128) return;
+    const current = searchRequest; const index = live.indexTick; const criteria = { ...activeSearch }; const total = searchPage.total;
+    try {
+      const items: BoardSymbol[] = [];
+      let offset: number | null = 0;
+      while (offset !== null) {
+        const page = await adapter.boardSearch({ ...criteria, offset, limit: 100 });
+        if (current !== searchRequest || live.indexTick !== index || page.total !== total) throw new Error('Selection changed while loading. Review the preview and try again.');
+        items.push(...page.items); offset = page.nextOffset;
+      }
+      merge(items); await add(items.map((item) => item.id));
     } catch (cause) { fail(cause); }
   }
-  async function search(offset = 0) {
+  async function ensureMembers(id: string, desired = 6) {
+    if (!adapter.boardMembers || id.startsWith('missing:')) return;
+    const generation = memberGeneration;
+    let cached = memberPages[id];
+    if (cached?.loading) return;
+    desired = Math.min(BOARD_MEMBER_REVEAL_LIMIT, desired);
+    const available = new Set(symbols.map((item) => item.id));
+    const held = cached?.ids?.filter((child) => available.has(child)).length ?? 0;
+    if (held >= desired) return;
+    if (cached?.ids && held < cached.ids.length) {
+      cached = { total: cached.total, ids: [], loaded: 0, nextOffset: 0 };
+      memberPages = { ...memberPages, [id]: cached };
+    }
+    let offset = cached?.nextOffset ?? 0;
+    if (cached?.nextOffset === null) return;
+    memberPages = { ...memberPages, [id]: { ...cached, loading: true } };
+    try {
+      do {
+        const page = await adapter.boardMembers({ id, offset, limit: 100, ...filters });
+        if (generation !== memberGeneration) return;
+        merge(page.symbols); merge(page.items);
+        memberPages = { ...memberPages, [id]: { ids: [...new Set([...(memberPages[id]?.ids ?? []), ...page.items.map((item) => item.id)])], total: page.total, loaded: (memberPages[id]?.loaded ?? 0) + page.items.length, nextOffset: page.nextOffset, bounded: page.bounded, loading: false } };
+        if (page.notes.length) notes = [...new Set([...notes, ...page.notes])];
+        offset = page.nextOffset ?? -1;
+      } while (offset >= 0 && (memberPages[id]?.ids?.length ?? 0) < desired);
+      refresh();
+    } catch (cause) { if (generation === memberGeneration) fail(cause); }
+    finally { if (generation === memberGeneration) { memberPages = { ...memberPages, [id]: { ...memberPages[id], loading: false } }; refresh(); } }
+  }
+  async function search(offset = 0, paging = false) {
     if (!adapter.boardSearch) return;
     const current = ++searchRequest; searchBusy = true; error = '';
     try {
-      const value = await adapter.boardSearch({ q: libraryQ, kind: libraryKind || undefined, path: libraryPath || undefined, offset });
+      const criteria = paging && activeSearch ? { ...activeSearch, offset } : { q: libraryQ, kind: libraryKind || undefined, path: libraryPath || undefined, namespace: libraryNamespace || undefined, offset, ...filters };
+      const value = await adapter.boardSearch(criteria);
       if (current !== searchRequest) return;
-      merge(value.items); searchPage = offset && searchPage ? { ...value, items: [...searchPage.items, ...value.items] } : value;
+      merge([...(value.symbols ?? []), ...value.items]); activeSearch = { ...criteria }; searchPage = value;
+      notice = `Selection: showing ${offset + (value.items.length ? 1 : 0)}–${offset + value.items.length} of ${value.total} matches. Selected identities are retained across pages.`;
+      if (paging) void tick().then(() => { boardElement.querySelector<HTMLElement>('.library h2')?.focus(); const list = boardElement.querySelector('.library .result-list'); if (list) list.scrollTop = 0; });
     } catch (cause) { if (current === searchRequest) fail(cause); }
     finally { if (current === searchRequest) searchBusy = false; }
   }
-  function closeCard(id: string) { nodes = nodes.filter((node) => node.id !== id); sourceHeights.delete(id); }
+  async function acceptReaderRequests(ids: string[]) {
+    if (!adapter.board) return;
+    const token = epoch;
+    try {
+      if (new Set([...included, ...expanded, ...hidden, ...nodes.filter((node) => node.type === 'code').map((node) => node.data.symbolId), ...ids]).size > 128) throw new Error('The requested symbols exceed this board’s 128-identity limit. Remove hidden selections or start a new board.');
+      const value = await adapter.board(ids, undefined, filters);
+      if (token !== epoch) return;
+      merge(value.symbols);
+      if (value.missing.length) notes = [...notes, `${value.missing.length} requested reader identities are no longer in this index.`];
+      if (value.included.length) { await add(value.included); await fitGraph(); }
+    } catch (cause) { if (token === epoch) fail(cause); }
+  }
+  $effect(() => { if (boardRequests.pending.length) untrack(() => { void acceptReaderRequests(boardRequests.take()); }); });
+  async function forget(id: string) {
+    if (!window.confirm(`Remove ${display(id)} from this board's selection? Its source and indexed graph are unchanged.`)) return;
+    included = included.filter((item) => item !== id); hidden = hidden.filter((item) => item !== id && model.representative(item, included, []) !== null);
+    expanded = expanded.filter((item) => item !== id && model.representative(item, included, []) !== null);
+    positions.delete(id); hideHistory = hideHistory.filter((item) => item !== id); selected = null;
+    await loadSnapshot(); notice = 'Removed from the board recipe only. Any independent source card remains open.';
+  }
+  function closeCard(id: string) { nodes = nodes.filter((node) => node.id !== id); sourceHeights.delete(id); void tick().then(() => boardElement?.querySelector<HTMLElement>('[data-add-symbols]')?.focus()); }
+  function resizeCard(id: string, widthDelta: number, heightDelta: number) {
+    nodes = nodes.map((node) => node.id === id && node.type === 'code' ? { ...node, width: Math.max(380, Math.min(4096, (node.width ?? node.measured?.width ?? 530) + widthDelta)), height: Math.max(190, Math.min(4096, (node.height ?? node.measured?.height ?? 310) + heightDelta)) } : node);
+  }
+  function followSource(target: BoardSymbol, line?: number) { merge([target]); openCode(target.id, true, line ?? null); }
   function toggleCard(id: string) {
     nodes = nodes.map((node) => {
       if (node.type !== 'code' || node.id !== id) return node;
@@ -207,19 +396,19 @@
     });
   }
   function readCard(id: string) { void tick().then(() => fitView({ nodes: [{ id }], padding: 0.25, maxZoom: 1.1, duration: 200 })); }
-  function openCode(id: string, fit = true) {
+  function openCode(id: string, fit = true, highlight: number | null = null) {
     if (codeCount >= 32 && !nodes.some((node) => node.id === `code:${id}`)) { error = 'Close a source card before opening another (maximum 32).'; return; }
-    if (new Set([...included, ...nodes.filter((node) => node.type === 'code').map((node) => node.data.symbolId), id]).size > 128) { error = 'This board already retains 128 symbol identities. Close a source-only card or start another board.'; return; }
+    if (new Set([...included, ...expanded, ...hidden, ...nodes.filter((node) => node.type === 'code').map((node) => node.data.symbolId), id]).size > 128) { error = 'This board already retains 128 symbol identities. Close a source-only card or start another board.'; return; }
     const item = model.symbol(id); const key = `code:${id}`;
-    if (nodes.some((node) => node.id === key)) nodes = nodes.map((node) => ({ ...node, selected: node.id === key, ...(node.id === key ? { zIndex: ++zIndex } : {}) }));
+    if (nodes.some((node) => node.id === key)) nodes = nodes.map((node) => node.id === key && node.type === 'code' ? { ...node, selected: true, zIndex: ++zIndex, data: { ...node.data, highlight } } : { ...node, selected: false });
     else {
       const top = Math.max(820, ...nodes.filter((node) => node.type === 'symbol').map((node) => node.position.y + (node.measured?.height ?? 240) + 100));
       nodes = [...nodes.map((node) => ({ ...node, selected: false })), { id: key, type: 'code', position: nextCodePosition(nodes.filter((node) => node.type === 'code'), top), width: 530, height: 310, selected: true, zIndex: ++zIndex, dragHandle: '.board-drag-handle', connectable: false,
-        data: { symbolId: id, symbol: item, collapsed: false, close: closeCard, toggle: toggleCard, read: readCard } }];
+        data: { symbolId: id, symbol: item, collapsed: false, highlight, filters, follow: followSource, resize: resizeCard, close: closeCard, toggle: toggleCard, read: readCard } }];
     }
-    if (fit) { panel = null; evidence = null; readCard(key); }
+    if (fit) { panel = null; evidence = null; readCard(key); void tick().then(() => boardElement?.querySelector<HTMLElement>(`[data-id="${CSS.escape(key)}"]`)?.focus()); }
   }
-  async function compare(edge: BoardEvidence) { openCode(edge.source, false); openCode(edge.target, false); panel = null; evidence = null; await fitCode(); }
+  async function compare(edge: BoardEvidence) { openCode(edge.source, false, edge.line ?? null); openCode(edge.target, false); panel = null; evidence = null; await fitCode(); }
   function tidy() {
     let x = 30; let y = 30; let height = 0;
     nodes = nodes.map((node) => { if (node.type !== 'symbol') return node; if (x > 900) { x = 30; y += height + 100; height = 0; }
@@ -227,14 +416,14 @@
     void fitGraph();
   }
   function documentState(): BoardDocument {
-    const ids = [...new Set([...included, ...nodes.filter((node) => node.type === 'code').map((node) => node.data.symbolId as string)])];
+    const ids = [...new Set([...included, ...expanded, ...hidden, ...nodes.filter((node) => node.type === 'code').map((node) => node.data.symbolId as string)])];
     const keys = new Map(ids.map((id, index) => [id, `s${index}`]));
     return { version: 1, symbols: ids.flatMap((id) => {
       const item = symbols.find((value) => value.id === id); if (!item) return [];
       return [{ key: keys.get(id)!, identity: originalIdentities.get(id) ?? { id: item.id, qualifiedName: item.qualifiedName, kind: item.kind, file: item.file, ...(item.signature ? { signature: item.signature } : {}) },
-        position: { ...(nodes.find((node) => node.id === id)?.position ?? positions.get(id) ?? { x: 30, y: 30 }) }, included: included.includes(id), hidden: hidden.includes(id), expanded: expanded.includes(id) }];
+        position: { ...(nodes.find((node) => node.id === id)?.position ?? positions.get(id) ?? { x: 30, y: 30 }) }, included: included.includes(id), hidden: hidden.includes(id), expanded: expanded.includes(id), ...(limits[id] ? { memberLimit: limits[id] } : {}) }];
     }), cards: nodes.filter((node) => node.type === 'code').map((node, index) => ({ key: `c${index}`, symbolKey: keys.get(node.data.symbolId as string)!, position: { ...node.position }, width: node.width ?? node.measured?.width ?? 530, height: node.data.collapsed ? sourceHeights.get(node.id) ?? 310 : node.height ?? node.measured?.height ?? 310, collapsed: Boolean(node.data.collapsed), zIndex: node.zIndex ?? 10 })),
-      viewport: { ...viewport }, filters: { kind, showStructure: structure } };
+      viewport: { ...viewport }, filters: { kind, showStructure: structure, includeTests, includeGenerated, includeUncertain } };
   }
   function fingerprint(name = boardName, document = documentState()) { return JSON.stringify({ name, document }); }
   async function listBoards() { try { if (adapter.boards) boardList = await adapter.boards(); } catch (cause) { fail(cause); } }
@@ -254,10 +443,24 @@
     // Resolve and fetch into locals before changing any reviewer-owned state.
     const mapping = new Map(value.resolutions.filter((item) => item.node).map((item) => [item.key, item.node!.id]));
     const ids = value.board.symbols.filter((item) => item.included && mapping.has(item.key)).map((item) => mapping.get(item.key)!);
-    const snapshot = adapter.board ? await adapter.board(ids) : null;
+    const restoredFilters = { tests: value.board.filters.includeTests ?? false, generated: value.board.filters.includeGenerated ?? false, uncertain: value.board.filters.includeUncertain ?? false };
+    const snapshot = adapter.board ? await adapter.board(ids, undefined, restoredFilters) : null;
+    const restoredMembers: BoardSymbol[] = [];
+    const restoredPages: Record<string, BoardMemberPageState> = {};
+    if (adapter.boardMembers) for (const entry of value.board.symbols.filter((item) => item.expanded)) {
+      const id = mapping.get(entry.key); if (!id) continue;
+      const desired = entry.memberLimit ?? 6; let offset: number | null = 0; const childIds: string[] = [];
+      do {
+        if (token !== epoch || fingerprint() !== expected) return false;
+        const page = await adapter.boardMembers({ id, offset, limit: 100, ...restoredFilters });
+        restoredMembers.push(...page.symbols, ...page.items); childIds.push(...page.items.map((item) => item.id));
+        offset = page.nextOffset;
+        restoredPages[id] = { ids: [...new Set(childIds)], total: page.total, loaded: childIds.length, nextOffset: offset, bounded: page.bounded };
+      } while (offset !== null && childIds.length < desired);
+    }
     if (token !== epoch) return false;
     if (expected !== fingerprint()) { notice = 'Board changed while a replacement was loading; newer work was preserved. Retry the operation.'; busy = false; return false; }
-    ++request; ++connectionRequest; ++searchRequest;
+    ++request; ++connectionRequest; ++searchRequest; ++memberGeneration; memberPages = {};
     originalIdentities.clear(); positions.clear(); sourceHeights.clear();
     const loaded: BoardSymbol[] = [];
     for (const entry of value.board.symbols) {
@@ -268,11 +471,15 @@
       loaded.push(resolution?.node ?? { id, kind: entry.identity.kind, name: entry.identity.qualifiedName, qualifiedName: entry.identity.qualifiedName, file: entry.identity.file, line: 1, purpose: `${resolution?.status ?? 'missing'}: ${resolution?.note ?? 'Saved symbol is not uniquely present in this index.'}` });
     }
     symbols = [...new Map(loaded.map((item) => [item.id, item])).values()]; nodes = []; relations = snapshot?.relations ?? [];
-    if (snapshot) merge(snapshot.symbols); notes = snapshot?.notes ?? [];
+    snapshotIds = new Set(snapshot?.symbols.map((item) => item.id) ?? []);
+    eligibleIds = new Set(snapshot?.scopeIds ?? snapshotIds);
+    merge(value.symbols ?? []); if (snapshot) merge(snapshot.symbols); merge(restoredMembers); notes = [...(snapshot?.notes ?? []), ...(value.notes ?? [])]; memberPages = restoredPages;
     included = [...new Set(value.board.symbols.filter((item) => item.included).map((item) => mapping.get(item.key)!))];
     hidden = [...new Set(value.board.symbols.filter((item) => item.hidden).map((item) => mapping.get(item.key)!))];
     expanded = [...new Set(value.board.symbols.filter((item) => item.expanded).map((item) => mapping.get(item.key)!))];
-    kind = value.board.filters.kind; structure = value.board.filters.showStructure; limits = {}; history = []; hideHistory = [];
+    kind = value.board.filters.kind; structure = value.board.filters.showStructure;
+    includeTests = restoredFilters.tests; includeGenerated = restoredFilters.generated; includeUncertain = restoredFilters.uncertain;
+    limits = Object.fromEntries(value.board.symbols.filter((item) => item.memberLimit).map((item) => [mapping.get(item.key)!, item.memberLimit!])); history = []; hideHistory = [];
     panel = null; evidence = null; selected = null; locatedMember = undefined;
     refresh();
     for (const card of value.board.cards) {
@@ -300,9 +507,12 @@
   }
   function newBoard() {
     if (!canReplace()) return;
-    ++epoch; ++saveEpoch; ++saveRequest; ++request; ++searchRequest; ++connectionRequest; busy = false; saving = false; symbols = []; relations = []; included = []; hidden = []; expanded = []; nodes = []; originalIdentities.clear(); positions.clear();
-    boardId = undefined; boardName = ''; kind = ''; structure = false; panel = null; evidence = null; viewport = { x: 0, y: 0, zoom: 1 };
+    ++epoch; ++saveEpoch; ++saveRequest; ++request; ++searchRequest; ++connectionRequest; ++groupRequest; ++memberGeneration; memberPages = {}; busy = false; saving = false; symbols = []; relations = []; included = []; hidden = []; expanded = []; nodes = []; originalIdentities.clear(); positions.clear(); snapshotIds = new Set(); eligibleIds = new Set(); selectedSources = [];
+    boardId = undefined; boardName = ''; kind = ''; structure = false; includeTests = false; includeGenerated = false; includeUncertain = false; excluded = undefined;
+    libraryNamespace = ''; namespaceName = ''; libraryPath = ''; searchSelection = []; searchPage = null; groupPage = null; history = []; connectionPage = null;
+    panel = null; evidence = null; viewport = { x: 0, y: 0, zoom: 1 };
     savedFingerprint = fingerprint(); notes = []; error = ''; notice = 'New empty board. Add only the symbols you choose.';
+    void tick().then(() => boardElement?.querySelector<HTMLElement>('[data-add-symbols]')?.focus());
   }
   function exportBoard() {
     const blob = new Blob([JSON.stringify({ name: boardName || 'Review board', document: documentState() }, null, 2)], { type: 'application/json' });
@@ -319,9 +529,29 @@
       if (await applyLoaded(loaded, token, expected)) { ++saveEpoch; ++saveRequest; saving = false; boardId = undefined; boardName = typeof value.name === 'string' ? value.name.slice(0, 120) : 'Imported board'; savedFingerprint = ''; notice = 'Imported into memory only. Save as to keep a project-local copy.'; }
     } catch (cause) { if (token === epoch) fail(cause); } finally { importFile.value = ''; if (token === epoch) busy = false; }
   }
-  function showEvidence(edge: Edge) { if (edge.data?.relation) { evidence = edge.data.relation as BoardRelation; panel = null; } }
+  function showEvidence(edge: Edge) {
+    if (!edge.data?.relation) return;
+    if (!panel && !evidence && document.activeElement instanceof HTMLElement) returnFocus = document.activeElement;
+    evidence = edge.data.relation as BoardRelation; panel = null;
+    void tick().then(() => boardElement?.querySelector<HTMLElement>('[aria-label="Relationship evidence"] h2')?.focus());
+  }
   function beforeUnload(event: BeforeUnloadEvent) { if (dirty) { event.preventDefault(); event.returnValue = ''; } }
-  function onkeydown(event: KeyboardEvent) { if (event.key === 'Escape') { panel = null; evidence = null; } }
+  function onkeydown(event: KeyboardEvent) {
+    if (!(event.target instanceof HTMLElement) || !boardElement?.contains(event.target) || boardElement.closest('[hidden]')) return;
+    const typing = event.target.closest('input,select,textarea,[contenteditable=true]');
+    if (event.key === 'Escape' && (panel || evidence || helpOpen)) { event.preventDefault(); event.stopPropagation(); helpOpen = false; closePanel(); return; }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); event.stopPropagation(); if (!busy && !saving) void save(); return; }
+    if (typing) return;
+    if (event.altKey) {
+      const key = event.key.toLowerCase();
+      if (['g', 'f', 'c', 'a', 'arrowleft'].includes(key)) { event.preventDefault(); event.stopPropagation(); }
+      if (key === 'g') void fitGraph(); else if (key === 'f') void fitSelection(); else if (key === 'c') void fitCode();
+      else if (key === 'a') { setPanel('library'); void search(); } else if (key === 'arrowleft' && panel === 'connections') void backConnections();
+    } else if (event.key === 'Delete' && (event.target.matches('.svelte-flow__node') || event.target.matches('.board-drag-handle[tabindex]'))) {
+      const id = event.target.closest<HTMLElement>('.svelte-flow__node')?.dataset.id;
+      if (id) { event.preventDefault(); event.stopPropagation(); if (id.startsWith('code:')) closeCard(id); else act('hide', id); }
+    }
+  }
   async function refreshIndex() {
     if (!adapter.resolveBoard || !documentState().symbols.length) return;
     const token = ++epoch; const expected = fingerprint(); const wasDirty = dirty; busy = true;
@@ -339,57 +569,67 @@
 {#if !adapter.board || !adapter.boardSearch || !adapter.boardConnections}
   <p class="unavailable">This host does not provide Review Board graph queries.</p>
 {:else}
-<div class="board">
+<div class="board" bind:this={boardElement} role="region" aria-label="Review Board">
   <div class="toolbar">
-    <div class="tools"><button class="primary" onclick={() => { panel = 'library'; evidence = null; void search(); }}>+ Add symbols</button><button onclick={() => { panel = 'hidden'; evidence = null; }}>Hidden items ({hidden.length})</button>{#if lastHidden}<button onclick={() => add([lastHidden!])}>Undo hide</button>{/if}
+    <div class="tools"><button class="primary" data-add-symbols onclick={() => { setPanel('library'); void search(); }}>+ Add symbols</button><button data-hidden-items onclick={() => setPanel('hidden')}>Hidden items ({hidden.length})</button>{#if lastHidden}<button onclick={() => restoreHidden([lastHidden!])}>Undo hide</button>{/if}
       <label>Edges <select aria-label="Canvas relationship filter" bind:value={kind} onchange={() => { evidence = null; refresh(); }}><option value="">All kinds</option>{#each allEdgeKinds as item}<option value={item}>{kindLabel(item)}</option>{/each}</select></label>
       <label><input type="checkbox" bind:checked={structure} onchange={refresh} /> Ownership arrows</label>
     </div>
-    <div class="tools"><button disabled={busy} onclick={refreshIndex}>Refresh index</button><button onclick={fitGraph}>Fit graph</button><button disabled={!codeCount} onclick={fitCode}>Fit code ({codeCount})</button><button onclick={tidy}>Tidy</button><button onclick={() => { panel = 'boards'; evidence = null; void listBoards(); }}>Saved boards</button><button onclick={newBoard}>New</button></div>
+    <div class="tools"><button disabled={busy || !adapter.resolveBoard || (!included.length && !codeCount && !expanded.length && !hidden.length)} onclick={refreshIndex}>Refresh index</button><button onclick={fitGraph}>Fit graph</button><button onclick={fitSelection}>Fit selection</button><button disabled={!codeCount} onclick={fitCode}>Fit code ({codeCount})</button><button onclick={tidy}>Tidy</button><button onclick={() => { setPanel('boards'); void listBoards(); }}>Saved boards</button><button onclick={newBoard}>New</button><button aria-expanded={helpOpen} onclick={() => helpOpen = !helpOpen}>Keyboard help</button></div>
   </div>
+  <div class="visibility" aria-label="Board visibility filters"><span>Include:</span><label><input type="checkbox" bind:checked={includeTests} onchange={changeFilters} /> Tests</label><label><input type="checkbox" bind:checked={includeGenerated} onchange={changeFilters} /> Generated code</label><label><input type="checkbox" bind:checked={includeUncertain} onchange={changeFilters} /> Uncertain matches</label><span>Explicitly selected cards stay included.{#if exclusionLabel(excluded)} Excluded from loaded board: {exclusionLabel(excluded)}. Counts are disjoint in test → generated → uncertain order.{/if}</span></div>
+  {#if helpOpen}<section class="keyboard-help" aria-label="Board keyboard help"><b>Keyboard:</b> Tab to controls; Enter/Space activates. Focus a graph/source card and press Enter/Space to select it; arrow keys then move it (Shift for larger steps). Alt+G fits the graph, Alt+F fits selected cards, Alt+C fits code, Alt+A opens selection, Alt+Left returns in Connections, Ctrl/Cmd+S saves. Delete on a focused card hides it (or closes a source card). Escape closes the panel and restores focus. Source cards provide size buttons. Shift-click selects multiple cards.</section>{/if}
   <div class="savebar"><input aria-label="Board name" placeholder="Name this board…" bind:value={boardName} maxlength={120} /><button disabled={readOnly || busy || saving || !boardName.trim()} onclick={() => save()}>Save</button><button disabled={readOnly || busy || saving || !boardName.trim()} onclick={() => save(true)}>Save as</button>
     <span>{dirty ? 'Unsaved changes' : boardId ? 'Saved' : 'New board'}{readOnly ? ` · ${boardList?.readOnlyReason ?? 'Read-only host'}` : ' · metadata only'}</span>
     <button onclick={exportBoard}>Export JSON</button><button disabled={!adapter.resolveBoard} onclick={() => importFile.click()}>Import JSON</button><input class="file-input" type="file" accept="application/json,.json" bind:this={importFile} onchange={importBoard} />
   </div>
   {#if error}<div class="error" role="alert">{error}<button onclick={() => error = ''} aria-label="Dismiss board error">×</button></div>{/if}
   {#if notes.length}<details class="bounds"><summary>Index boundaries / query limits ({notes.length})</summary>{#each notes as note}<p>{note}</p>{/each}</details>{/if}
-  <div class="canvas" aria-label="Review board canvas">
+  <div class="canvas" aria-label="Review board canvas" role="group">
     <SvelteFlow bind:nodes bind:viewport {edges} {nodeTypes} {edgeTypes} minZoom={0.15} maxZoom={1.6} nodesConnectable={false} deleteKey={null} zoomOnDoubleClick={false} panOnDrag proOptions={{ hideAttribution: true }}
-      onnodeclick={({ node }) => { selected = node.type === 'symbol' ? node.id : node.data.symbolId; if (node.type === 'code') nodes = nodes.map((item) => item.id === node.id ? { ...item, zIndex: ++zIndex } : item); }}
-      onedgeclick={({ edge }) => showEvidence(edge)} onselectionchange={({ edges: selectedEdges }) => { if (selectedEdges.length === 1) showEvidence(selectedEdges[0]!); }} onpaneclick={() => { selected = null; evidence = null; }}>
+      onnodeclick={({ node }) => { selected = node.type === 'symbol' ? node.id : model.targetState(node.data.symbolId, included, hidden).representative; if (node.type === 'code') nodes = nodes.map((item) => item.id === node.id ? { ...item, zIndex: ++zIndex } : item); }}
+      onedgeclick={({ edge }) => showEvidence(edge)} onselectionchange={({ edges: selectedEdges, nodes: selectedNodes }) => { reflectSourceSelection(selectedNodes); if (selectedEdges.length === 1) showEvidence(selectedEdges[0]!); }} onpaneclick={() => { selected = null; evidence = null; }}>
       <Background gap={24} size={1} patternColor="var(--rule-soft)" /><Controls showLock={false} /><MiniMap pannable zoomable nodeColor={(node) => node.type === 'code' ? 'var(--press-2)' : 'var(--accent)'} />
     </SvelteFlow>
     {#if !included.length}<section class="empty"><h2>Choose what you want to understand</h2><p>Add symbols from this index. Connections helps you follow only the targets you choose.</p></section>{/if}
     {#if panel === 'library'}
-      <aside class="panel library" aria-label="Symbol library"><div class="panel-heading"><h2>Add symbols</h2><button aria-label="Close symbol library" onclick={() => panel = null}>×</button></div>
+      <aside class="panel library" aria-label="Symbol library"><div class="panel-heading"><h2 tabindex="-1">Add symbols</h2><button aria-label="Close symbol library" onclick={closePanel}>×</button></div>
+        <div class="direction" aria-label="Selection source"><button class:active={libraryMode === 'symbols'} onclick={() => { libraryMode = 'symbols'; void search(); }}>Symbols</button><button class:active={libraryMode === 'folder'} disabled={!adapter.boardGroups} onclick={() => { libraryMode = 'folder'; groupPage = null; activeGroup = null; void groups(); }}>Folders</button><button class:active={libraryMode === 'namespace'} disabled={!adapter.boardGroups} onclick={() => { libraryMode = 'namespace'; groupPage = null; activeGroup = null; void groups(); }}>Namespaces</button></div>
+        {#if libraryMode !== 'symbols'}
+          <form onsubmit={(event) => { event.preventDefault(); void groups(); }}><label class="field">Find {libraryMode === 'folder' ? 'folders' : 'namespaces'}<input aria-label="Search selection groups" bind:value={groupQuery} /></label><button class="search" type="submit">Find groups</button></form>
+          <div class="batch"><span>{groupPage?.total ?? 0} groups · preview before adding</span></div>
+          <div class="result-list">{#each groupPage?.notes ?? [] as note}<p class="hint">{note}</p>{/each}{#each groupPage?.items ?? [] as group (group.id)}<section class="result"><strong>{group.name}</strong><span>{group.total} eligible symbols{group.type === 'folder' ? ' including nested folders' : ' in this indexed namespace scope'}</span>{#if group.type === 'namespace'}<small>{group.path}</small>{/if}<small>{group.byKind.map((entry) => `${entry.count} ${kindLabel(entry.kind)}`).join(' · ')}</small><button aria-label={`Preview ${group.type} ${group.name}`} onclick={() => browseGroup(group)}>Preview symbols</button></section>{/each}{#if (activeGroup?.offset ?? 0) > 0}<button class="more" disabled={groupBusy} onclick={() => groups(Math.max(0, (activeGroup?.offset ?? 0) - 30), true)}>Previous groups</button>{/if}{#if groupPage?.nextOffset !== null && groupPage?.nextOffset !== undefined}<button class="more" disabled={groupBusy} onclick={() => groups(groupPage!.nextOffset!, true)}>Next groups</button>{/if}{#if groupBusy}<p class="hint">Loading groups…</p>{/if}</div>
+        {:else}
         <form onsubmit={(event) => { event.preventDefault(); void search(); }}><label class="field">Search<input aria-label="Search indexed symbols" bind:value={libraryQ} placeholder="Name or qualified name" /></label>
           <div class="filter-row"><label class="field">Kind<select aria-label="Symbol kind filter" bind:value={libraryKind}><option value="">All kinds</option>{#each allNodeKinds as item}<option value={item}>{kindLabel(item)}</option>{/each}</select></label><label class="field">Folder / file prefix<input aria-label="Symbol path filter" bind:value={libraryPath} placeholder="src/" /></label></div><button class="search" type="submit">Search index</button></form>
-        <div class="batch"><span>{searchPage?.total ?? 0} matches{searchPage?.bounded ? ' · bounded' : ''}</span><button disabled={!searchSelection.length} onclick={() => add(searchSelection)}>Add selected ({searchSelection.length})</button></div>
-        <div class="result-list">{#each searchPage?.items ?? [] as item (item.id)}{@const state = model.targetState(item.id, included, hidden)}<section class="result"><label class="choice"><input type="checkbox" checked={searchSelection.includes(item.id)} aria-label={`Select ${item.qualifiedName}`} onchange={(event) => searchSelection = choose(searchSelection, item.id, event.currentTarget.checked)} /><KindGlyph kind={item.kind} /><strong>{item.name}</strong></label><small>{item.kind} · {item.qualifiedName} · {item.file}:{item.line}</small>
+        {#if libraryNamespace}<div class="batch"><span>Namespace: {namespaceName}</span><button onclick={() => { libraryNamespace = ''; namespaceName = ''; void search(); }}>Clear namespace</button></div>{/if}
+        <div class="batch"><span>{searchPage?.total ?? 0} matches{searchPage?.bounded ? ' · bounded' : ''}</span><button disabled={!searchSelection.length} onclick={() => add(searchSelection)}>Add selected ({searchSelection.length})</button><button disabled={!searchPage?.total || searchPage.total > 128 || searchBusy} onclick={addAllMatches}>Add all matches ({searchPage?.total ?? 0})</button>{#if (searchPage?.total ?? 0) > 128}<small>Narrow the folder/namespace, name or kind: a board retains at most 128 identities.</small>{/if}</div>
+        <div class="result-list">{#each searchPage?.notes ?? [] as note}<p class="hint">{note}</p>{/each}{#each searchPage?.items ?? [] as item (item.id)}{@const state = model.targetState(item.id, included, hidden)}<section class="result"><label class="choice"><input type="checkbox" checked={searchSelection.includes(item.id)} aria-label={`Select ${item.qualifiedName}`} onchange={(event) => searchSelection = choose(searchSelection, item.id, event.currentTarget.checked)} /><KindGlyph kind={item.kind} /><strong>{item.name}</strong></label><small>{item.kind} · {item.qualifiedName} · {item.file}:{item.line}</small>
           <div class="row-actions"><button aria-label={`${state.status === 'visible' ? 'Locate' : state.status === 'hidden' ? 'Restore' : 'Add'} ${item.qualifiedName}`} onclick={() => targetAction(item.id)}>{state.status === 'visible' ? state.representative === item.id ? 'Pinned · Locate' : 'Folded · Locate' : state.status === 'hidden' ? 'Restore' : 'Add to board'}</button>{#if state.status === 'visible' && state.representative !== item.id}<button onclick={() => add([item.id])}>Pin separately</button>{/if}<button onclick={() => openCode(item.id)}>Source</button></div></section>{/each}
-          {#if searchPage?.nextOffset !== null && searchPage?.nextOffset !== undefined}<button class="more" disabled={searchBusy} onclick={() => search(searchPage!.nextOffset!)}>Show more</button>{/if}{#if searchBusy}<p>Searching…</p>{/if}</div>
+          {#if (activeSearch?.offset ?? 0) > 0}<button class="more" disabled={searchBusy} onclick={() => search(Math.max(0, (activeSearch?.offset ?? 0) - 40), true)}>Previous symbols</button>{/if}{#if searchPage?.nextOffset !== null && searchPage?.nextOffset !== undefined}<button class="more" disabled={searchBusy} onclick={() => search(searchPage!.nextOffset!, true)}>Next symbols</button>{/if}{#if searchBusy}<p>Searching…</p>{/if}</div>
+        {/if}
       </aside>
     {:else if panel === 'connections' && connectionScope}
-      <aside class="panel connections-panel" aria-label="Connections browser"><div class="panel-heading">{#if history.length}<button class="back" aria-label="Back to previous connections" onclick={backConnections}>← Back</button>{/if}<h2>Connections</h2><button aria-label="Close connections" onclick={() => panel = null}>×</button></div>
+      <aside class="panel connections-panel" aria-label="Connections browser"><div class="panel-heading">{#if history.length}<button class="back" aria-label="Back to previous connections" onclick={backConnections}>← Back</button>{/if}<h2 tabindex="-1">Connections</h2><button aria-label="Close connections" onclick={closePanel}>×</button></div>
         <div class="scope">{display(connectionScope)} · {withMembers ? 'with contained members' : 'this symbol only'}</div>
-        <div class="direction"><button class:active={direction === 'outgoing'} onclick={() => { direction = 'outgoing'; connectionSelection = []; void loadConnections(); }}>Outgoing</button><button class:active={direction === 'incoming'} onclick={() => { direction = 'incoming'; connectionSelection = []; void loadConnections(); }}>Incoming</button><label><input type="checkbox" bind:checked={withMembers} onchange={() => { connectionSelection = []; void loadConnections(); }} /> Members</label></div>
+        <div class="direction"><button class:active={direction === 'outgoing'} aria-pressed={direction === 'outgoing'} onclick={() => { direction = 'outgoing'; connectionSelection = []; void loadConnections(); }}>Outgoing</button><button class:active={direction === 'incoming'} aria-pressed={direction === 'incoming'} onclick={() => { direction = 'incoming'; connectionSelection = []; void loadConnections(); }}>Incoming</button><label><input type="checkbox" bind:checked={withMembers} onchange={() => { connectionSelection = []; void loadConnections(); }} /> Members</label></div>
         <form onsubmit={(event) => { event.preventDefault(); void loadConnections(); }}><div class="filter-row"><label class="field">Relationship<select aria-label="Connection relationship filter" bind:value={connectionKind} onchange={() => loadConnections()}><option value="">All kinds</option>{#each allEdgeKinds as item}<option value={item}>{kindLabel(item)}</option>{/each}</select></label><label class="field">Targets<input aria-label="Search connection targets" bind:value={connectionQ} placeholder="Name…" /></label><button type="submit">Find</button></div></form>
-        <div class="batch"><span>{connectionPage?.total ?? 0} targets{connectionPage?.bounded ? ' · bounded scope/evidence' : ''}</span><button disabled={!connectionSelection.length} onclick={() => add([...new Set(connectionSelection.map((id) => { const state = model.targetState(id, included, hidden); return state.status === 'hidden' ? state.representative : id; }))])}>Add selected ({connectionSelection.length})</button></div>
+        <div class="batch"><span>{connectionPage?.total ?? 0} targets{connectionPage?.bounded ? ' · bounded scope/evidence' : ''}</span><button disabled={!connectionSelection.length} onclick={() => includeTargets(connectionSelection)}>Add selected ({connectionSelection.length})</button></div>
         <div class="result-list">{#each connectionPage?.notes ?? [] as note}<p class="hint">{note}</p>{/each}{#each connectionPage?.items ?? [] as row (row.target.id)}{@const state = model.targetState(row.target.id, included, hidden)}
           <section class="result" data-connection-target={row.target.id}><label class="choice"><input type="checkbox" aria-label={`Select target ${row.target.qualifiedName}`} disabled={state.status === 'visible'} checked={connectionSelection.includes(row.target.id)} onchange={(event) => connectionSelection = choose(connectionSelection, row.target.id, event.currentTarget.checked)} /><KindGlyph kind={row.target.kind} /><strong>{row.target.name}</strong></label><small>{row.target.kind} · {row.target.qualifiedName} · {row.target.file}</small>
             <div class="tags">{#each [...new Set(row.evidence.map((edge) => edge.kind))] as item}<span>{kindLabel(item)}</span>{/each}</div><p>{state.status === 'visible' ? state.representative === row.target.id ? 'Pinned on board' : `Folded in ${display(state.representative)}` : state.status === 'hidden' ? `Hidden in ${display(state.representative)}` : 'Not on board'}</p>
-            <div class="row-actions"><button aria-label={`${state.status === 'visible' ? 'Locate' : state.status === 'hidden' ? 'Restore' : 'Add'} target ${row.target.qualifiedName}`} onclick={() => targetAction(row.target.id)}>{state.status === 'visible' ? 'Locate' : state.status === 'hidden' ? 'Restore' : 'Add to board'}</button>{#if row.owner}<button onclick={() => targetAction(row.owner!.id)}>Owner: {row.owner.name}</button>{/if}{#if state.status === 'visible' && state.representative !== row.target.id}<button onclick={() => add([row.target.id])}>Pin separately</button>{/if}<button onclick={() => openCode(row.target.id)}>Source</button><button onclick={() => openConnections(row.target.id)}>Connections</button></div>
-            <details><summary>{row.total} indexed evidence items</summary>{#each row.evidence as edge (edge.id)}<div class="evidence-row"><b>{display(edge.source)}</b> → {relationLabel(edge.kind)} → <b>{display(edge.target)}</b><small>{edge.file ?? 'Indexed edge'}{edge.line ? `:${edge.line}` : ''} · {edge.provenance ?? 'provenance unspecified'}{edge.confidence !== undefined ? ` · confidence ${edge.confidence}` : ''}</small>{#if edge.via || edge.synthesizedBy}<p>{edge.via ?? edge.synthesizedBy} {edge.registeredAt ?? ''}</p>{/if}<button onclick={() => compare(edge)}>Compare source ↗</button></div>{/each}{#if row.evidence.length < row.total}<button onclick={() => moreEvidence(row.target.id, row.evidence.length)}>More evidence ({row.total - row.evidence.length})</button>{/if}</details>
+            <div class="row-actions"><button aria-label={`${state.status === 'visible' ? 'Locate' : state.status === 'hidden' ? 'Restore' : 'Add'} target ${row.target.qualifiedName}`} onclick={() => targetAction(row.target.id)}>{state.status === 'visible' ? 'Locate' : state.status === 'hidden' ? 'Restore' : 'Add to board'}</button>{#if row.owner}{@const ownerState = model.targetState(row.owner.id, included, hidden)}<button onclick={() => targetAction(row.owner!.id)}>{ownerState.status === 'visible' ? 'Locate' : ownerState.status === 'hidden' ? 'Restore' : 'Add'} owner: {row.owner.name}</button>{/if}{#if state.status === 'visible' && state.representative !== row.target.id}<button onclick={() => add([row.target.id])}>Pin separately</button>{/if}<button onclick={() => openCode(row.target.id)}>Source</button><button aria-label={`Connections for target ${row.target.qualifiedName}`} onclick={() => openConnections(row.target.id)}>Connections</button></div>
+            <details><summary>{row.total} indexed evidence items</summary>{#each row.evidence as edge (edge.id)}<div class="evidence-row"><b>{display(edge.source)}</b> → {relationLabel(edge.kind)} → <b>{display(edge.target)}</b><small>{edge.file ?? 'Indexed edge'}{edge.line ? `:${edge.line}` : ''} · {edge.provenance ?? 'provenance unspecified'}{edge.confidence !== undefined ? ` · confidence ${edge.confidence}` : ''}</small>{#if edge.via || edge.synthesizedBy}<p>{edge.via ?? edge.synthesizedBy} {edge.registeredAt ?? ''}</p>{/if}<button onclick={() => compare(edge)}>Compare source ↗</button></div>{/each}{#if row.evidence.length < row.total}<button disabled={pendingEvidence[row.target.id] === connectionRequest} onclick={() => moreEvidence(row.target.id, row.evidence.length)}>More evidence ({row.total - row.evidence.length})</button>{/if}</details>
           </section>{/each}
-          {#if connectionPage?.nextOffset !== null && connectionPage?.nextOffset !== undefined}<button class="more" disabled={connectionBusy} onclick={() => loadConnections(connectionPage!.nextOffset!)}>Show more targets</button>{/if}{#if connectionBusy}<p>Loading connections…</p>{/if}
+          {#if (activeConnection?.offset ?? 0) > 0}<button class="more" disabled={connectionBusy} onclick={() => loadConnections(Math.max(0, (activeConnection?.offset ?? 0) - 30), true)}>Previous targets</button>{/if}{#if connectionPage?.nextOffset !== null && connectionPage?.nextOffset !== undefined}<button class="more" disabled={connectionBusy} onclick={() => loadConnections(connectionPage!.nextOffset!, true)}>Next targets</button>{/if}{#if connectionBusy}<p>Loading connections…</p>{/if}
         </div>
       </aside>
     {:else if panel === 'hidden'}
-      <aside class="panel" aria-label="Hidden items"><div class="panel-heading"><h2>Hidden items ({hidden.length})</h2><button onclick={() => panel = null} aria-label="Close hidden items">×</button></div><div class="result-list">{#each hidden as id}<section class="result"><strong>{display(id)}</strong><button onclick={() => add([id])}>Restore</button></section>{:else}<p class="hint">Nothing hidden.</p>{/each}</div></aside>
+      <aside class="panel" aria-label="Hidden items"><div class="panel-heading"><h2 tabindex="-1">Hidden items ({hidden.length})</h2>{#if hidden.length}<button onclick={() => restoreHidden([...hidden])}>Restore all hidden</button>{/if}<button onclick={closePanel} aria-label="Close hidden items">×</button></div><div class="result-list">{#each hidden as id}<section class="result"><strong>{display(id)}</strong><div class="row-actions"><button onclick={() => restoreHidden([id])}>Restore</button>{#if included.includes(id)}<button onclick={() => forget(id)}>Remove from board</button>{/if}</div></section>{:else}<p class="hint">Nothing hidden.</p>{/each}</div></aside>
     {:else if panel === 'boards'}
-      <aside class="panel" aria-label="Saved boards"><div class="panel-heading"><h2>Saved boards</h2><button onclick={() => panel = null} aria-label="Close saved boards">×</button></div><p class="hint">{boardList?.directory ?? '.codegraph/ui/boards/'} · {boardList?.skipped ?? 0} unreadable files skipped{boardList?.bounded ? ' · list bounded' : ''}</p><div class="result-list">{#each boardList?.boards ?? [] as item}<section class="result"><strong>{item.name}</strong><small>{item.updatedAt}</small><div class="row-actions"><button onclick={() => openBoard(item.id)}>Open {item.name}</button><button disabled={readOnly} onclick={() => removeBoard(item.id)}>Delete</button></div></section>{:else}<p class="hint">No saved boards.</p>{/each}</div></aside>
+      <aside class="panel" aria-label="Saved boards"><div class="panel-heading"><h2 tabindex="-1">Saved boards</h2><button onclick={closePanel} aria-label="Close saved boards">×</button></div><p class="hint">{boardList?.directory ?? '.codegraph/ui/boards/'} · {boardList?.skipped ?? 0} unreadable files skipped{boardList?.bounded ? ' · list bounded' : ''}</p><div class="result-list">{#each boardList?.boards ?? [] as item}<section class="result"><strong>{item.name}</strong><small>{item.updatedAt}</small><div class="row-actions"><button disabled={!adapter.loadBoard} onclick={() => openBoard(item.id)}>Open {item.name}</button><button disabled={readOnly || !adapter.deleteBoard} onclick={() => removeBoard(item.id)}>Delete</button></div></section>{:else}<p class="hint">No saved boards.</p>{/each}</div></aside>
     {/if}
-    {#if evidence}<aside class="panel" aria-label="Relationship evidence"><div class="panel-heading"><h2>{relationLabel(evidence.kind)}</h2><button onclick={() => evidence = null} aria-label="Close relationship evidence">×</button></div><p class="hint">{evidence.evidence.length} shown indexed edges. Browse Connections for full paged evidence when this projection is bounded.</p><div class="result-list">{#each evidence.evidence as edge (edge.id)}<section class="result"><strong>{display(edge.source)}</strong><span>→ {relationLabel(edge.kind)} →</span><strong>{display(edge.target)}</strong><small>{edge.file ?? ''}:{edge.line ?? ''} · {edge.provenance ?? 'unspecified'} · {edge.confidence ?? 'confidence unspecified'}</small>{#if edge.via || edge.synthesizedBy}<p>{edge.via ?? edge.synthesizedBy} {edge.registeredAt ?? ''}</p>{/if}<button onclick={() => compare(edge)}>Compare source ↗</button></section>{/each}</div></aside>{/if}
+    {#if evidence}<aside class="panel" aria-label="Relationship evidence"><div class="panel-heading"><h2 tabindex="-1">{relationLabel(evidence.kind)}</h2><button onclick={closePanel} aria-label="Close relationship evidence">×</button></div><p class="hint">{evidence.evidence.length} shown indexed edges. Browse Connections for full paged evidence when this projection is bounded.</p><div class="result-list">{#each evidence.evidence as edge (edge.id)}<section class="result"><strong>{display(edge.source)}</strong><span>→ {relationLabel(edge.kind)} →</span><strong>{display(edge.target)}</strong><small>{edge.file ?? ''}:{edge.line ?? ''} · {edge.provenance ?? 'unspecified'} · {edge.confidence ?? 'confidence unspecified'}</small>{#if edge.via || edge.synthesizedBy}<p>{edge.via ?? edge.synthesizedBy} {edge.registeredAt ?? ''}</p>{/if}<button onclick={() => compare(edge)}>Compare source ↗</button></section>{/each}</div></aside>{/if}
     <div class="notice" role="status">{busy ? 'Loading board…' : notice}</div>
   </div>
 </div>
@@ -399,6 +639,10 @@
   .board { height: 100%; display: flex; flex-direction: column; color: var(--ink); background: var(--paper); }
   .toolbar, .savebar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 8px 14px; border-bottom: 1px solid var(--rule-soft); flex-shrink: 0; }
   .toolbar { justify-content: space-between; }
+  .visibility { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 5px 14px; border-bottom: 1px solid var(--rule-soft); font-size: 10px; color: var(--ink-2); flex-shrink: 0; }
+  .visibility label { display: inline-flex; align-items: center; gap: 4px; }
+  .keyboard-help { padding: 8px 14px; font-size: 11px; line-height: 1.5; border-bottom: 1px solid var(--rule-soft); }
+  :global(.board :focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
   .tools { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
   button { font-size: 11px; padding: 5px 8px; border: 1px solid var(--rule-soft); }
   button:hover:not(:disabled) { background: var(--press); }
