@@ -97,6 +97,13 @@ npm i -g @colbymchenry/codegraph
 
 </details>
 
+### Build from source with Nix
+
+On Linux, `nix build .#codegraph` builds the CLI, browser viewer and native
+extraction kernel from this checkout. Run `./result/bin/codegraph`, or use
+`nix run . -- <command>`. See [the Nix build guide](BUNDLING.md#build-from-source-with-nix)
+for checks, development and consuming a pinned local patch branch.
+
 ### 2. Wire up your agent(s)
 
 In a **new terminal**, run the installer to connect CodeGraph to the agents you use:
