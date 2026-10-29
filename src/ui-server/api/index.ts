@@ -37,9 +37,9 @@
  * CORS headers and the method restriction are already enforced by the time a
  * handler here runs — including the extra shape a write has to have. The one
  * obligation that remains ours is the path chokepoint, `resolveProjectFile` for
- * anything that touches the repository. Two modules here reach the filesystem
- * and no others: `source.ts` reads the project's code, and `trail-store.ts`
- * reads and writes `.codegraph/ui/trails/`.
+ * anything that touches the repository. Source reads and project-local trail/board
+ * metadata go through that boundary. Board writes are limited to
+ * `.codegraph/ui/boards/`; they never change source, graph data or Git state.
  */
 
 import type { UiApiHandler, UiRequestContext } from '../index';
@@ -48,6 +48,7 @@ import { GraphSession } from './session';
 import { ApiError, badRequest, fail, notFound, ok, readJsonBody } from './respond';
 import { buildStats } from './stats';
 import { buildSearch } from './search';
+import { buildBoard, buildBoardSearch, buildBoardConnections, buildBoardEvidence } from './board';
 import { buildNode } from './node';
 import { buildSource } from './source';
 import { buildFile } from './file';
@@ -62,8 +63,10 @@ import { buildDeadCode } from './deadcode';
 import { buildFlow } from './flow';
 import { buildTrails, removeTrail, saveTrail, type TrailsOptions } from './trails';
 import { EventHub } from './events';
+import { handleBoardsRequest } from './boards';
 
 export { GraphSession } from './session';
+export type { BoardDocument } from './board-store';
 export { ApiError } from './respond';
 export * from './wire';
 export type {
@@ -76,6 +79,7 @@ export type { WireRoute, WireRoutes } from './routes';
 export type { WireHierarchy, WireHierarchyNode, WireOverride } from './hierarchy';
 export { MAX_HIERARCHY_ANCESTORS, MAX_HIERARCHY_DESCENDANTS } from './hierarchy';
 export type { WireNodeRefs } from './nodes';
+export type { BoardSymbol, BoardRelation, BoardProjection, BoardSearch, BoardConnections, BoardEvidence } from './board';
 export type {
   WireFlowPayload,
   WireFlow,
@@ -166,15 +170,19 @@ export interface GraphApiOptions {
 const API_INDEX = {
   name: 'codegraph ui',
   /**
-   * Every endpoint but `/api/trails` is a pure read. Kept as a field rather
+   * Every endpoint except the trail/board metadata writes is a pure read. Kept as a field rather
    * than dropped, because it was `true` and something may be reading it; it is
    * now the honest, narrower claim.
    */
   readOnly: false,
-  writes: ['POST /api/trails', 'DELETE /api/trails/<id>'],
+  writes: ['POST /api/trails', 'DELETE /api/trails/<id>', 'POST /api/boards', 'DELETE /api/boards/<id>'],
   endpoints: [
     { path: '/api/stats', description: 'Index state, graph counts, detected frameworks.' },
     { path: '/api/search', description: 'Ranked symbol search.', params: ['q', 'limit'] },
+    { path: '/api/board', description: 'Explicit all-kind Board selection and bounded contains projection.', params: ['ids'] },
+    { path: '/api/board/search', description: 'All-kind Board symbol and folder enumeration.', params: ['q', 'kind', 'path', 'offset', 'limit'] },
+    { path: '/api/board/connections', description: 'Paged all-kind indexed connections, independent of canvas membership.', params: ['id', 'direction', 'members', 'kind', 'q', 'offset', 'limit'] },
+    { path: '/api/board/evidence', description: 'Paged original evidence for one connection target.', params: ['id', 'direction', 'members', 'target', 'kind', 'q', 'offset', 'limit'] },
     {
       path: '/api/node/<id>',
       description:
@@ -234,8 +242,9 @@ const API_INDEX = {
       path: '/api/trails',
       description:
         'Saved trails, each hop re-resolved against the current index. POST saves one, ' +
-        'DELETE /api/trails/<id> removes it. The only endpoint that writes.',
+        'DELETE /api/trails/<id> removes it. Writes only trail metadata.',
     },
+    { path: '/api/boards', description: 'Project-local board metadata. POST saves; DELETE /api/boards/<id> removes; POST /api/boards/resolve validates in memory.' },
   ],
 };
 
@@ -257,6 +266,10 @@ export function createGraphApi(options: GraphApiOptions): GraphApi {
   const handler: UiApiHandler = async (req, res, ctx) => {
     const route = normalize(ctx.pathname);
     try {
+      if (await handleBoardsRequest(req, res, ctx, () => session.acquire(), {
+        readOnly: options.readOnly === true,
+        readOnlyReason: options.readOnly === true ? 'This viewer is running read-only; board metadata cannot be saved or deleted.' : null,
+      })) return true;
       // Writes first: they are the only requests that carry a body, and
       // routing them beside the readers would put a `case` that mutates in a
       // switch every other arm of which is a query.
@@ -270,6 +283,14 @@ export function createGraphApi(options: GraphApiOptions): GraphApi {
           return ok(res, buildStats(session.acquire(), ctx.projectRoot), ctx.method);
         case '/api/search':
           return ok(res, buildSearch(session.acquire(), ctx.query), ctx.method);
+        case '/api/board':
+          return ok(res, buildBoard(session.acquire(), ctx.query), ctx.method);
+        case '/api/board/search':
+          return ok(res, buildBoardSearch(session.acquire(), ctx.query), ctx.method);
+        case '/api/board/connections':
+          return ok(res, buildBoardConnections(session.acquire(), ctx.query), ctx.method);
+        case '/api/board/evidence':
+          return ok(res, buildBoardEvidence(session.acquire(), ctx.query), ctx.method);
         case '/api/routes':
           return ok(res, buildRoutes(session.acquire(), ctx.query), ctx.method);
         case '/api/map':
