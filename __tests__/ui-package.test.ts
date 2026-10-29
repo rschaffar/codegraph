@@ -709,6 +709,7 @@ describe('@colbymchenry/codegraph-ui — the seams', () => {
       ['symbol', symbolHref(null)],
       ['flow', flowHref()],
       ['dead', deadHref()],
+      ['board', '#/board'],
     ];
     for (const [view, href] of tabs) {
       expect(parseHash(href).route.view, `${href} should open the ${view} view`).toBe(view);
@@ -738,6 +739,23 @@ describe('@colbymchenry/codegraph-ui — the seams', () => {
     expect(asked[2]).toBe('api/source?file=src%2Fa.ts&from=1&to=4');
     // Repeated `id` params, never a comma-joined list.
     expect(asked[3]).toBe('api/nodes?id=a&id=b');
+  });
+
+  it('keeps Board transport optional and encodes all-kind queries and marker-gated metadata writes', async () => {
+    const asked: Array<{ url: string; init?: RequestInit }> = [];
+    const adapter = createHttpAdapter({ fetch: async (url, init) => {
+      asked.push({ url: String(url), init });
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    } });
+    await adapter.board!(['method:x@a,b.ts:3']);
+    expect(JSON.parse(new URL(asked[0]!.url, 'http://localhost').searchParams.get('ids')!)).toEqual(['method:x@a,b.ts:3']);
+    await adapter.boardConnections!({ id: 'method:x', members: true, direction: 'incoming', kind: 'type_of' });
+    const query = new URL(asked[1]!.url, 'http://localhost').searchParams;
+    expect(query.get('kind')).toBe('type_of'); expect(query.get('members')).toBe('1');
+    await adapter.saveBoard!({ name: 'Review', document: { version: 1, symbols: [], cards: [], viewport: { x: 0, y: 0, zoom: 1 }, filters: { kind: '', showStructure: false } } });
+    expect(asked[2]!.init?.method).toBe('POST');
+    expect((asked[2]!.init?.headers as Record<string, string>)['X-CodeGraph-UI']).toBe('1');
+    expect(mockAdapter().adapter.board).toBeUndefined();
   });
 
   it('an adapter with no live channel never connects and never polls', () => {

@@ -3,6 +3,7 @@
   import { trail } from '../lib/trail.svelte';
   import SearchPalette from './SearchPalette.svelte';
   import { live } from '../lib/live.svelte';
+  import { getGraphAdapter } from '../lib/adapter';
 
   interface Props {
     /** Indexed project name, e.g. "codegraph/". Null until stats load. */
@@ -77,6 +78,7 @@
     <a href={symbolTabHref} class:active={view === 'symbol' || (view === 'home' && !showScreens)}>Symbol</a>
     <a href={flowHref()} class:active={view === 'flow'}>Flow</a>
     <a href={deadHref()} class:active={view === 'dead'}>Dead code</a>
+    {#if getGraphAdapter().board}<a href="#/board" class:active={view === 'board'}>Board</a>{/if}
   </nav>
 
   <SearchPalette bind:this={search} />

@@ -103,6 +103,20 @@ async function main() {
     assert.ok(result.results.items.some((node) => node.name === 'hello'));
     console.log('viewer: read-only server, bundled HTML/JavaScript and indexed search passed');
 
+    const selected = await (await fetch(`${base}/api/board/search?q=hello&kind=function`)).json();
+    const id = selected.items.find((item) => item.name === 'hello').id;
+    const board = await (await fetch(`${base}/api/board?ids=${encodeURIComponent(JSON.stringify([id]))}`)).json();
+    assert.deepEqual(board.included, [id]);
+    assert.ok(board.symbols.some((item) => item.id === id));
+    const boards = await (await fetch(`${base}/api/boards`)).json();
+    assert.equal(boards.readOnly, true);
+    const refused = await fetch(`${base}/api/boards`, { method: 'POST', headers: { 'content-type': 'application/json', 'X-CodeGraph-UI': '1' }, body: '{}' });
+    assert.equal(refused.status, 403);
+    const resolved = await fetch(`${base}/api/boards/resolve`, { method: 'POST', headers: { 'content-type': 'application/json', 'X-CodeGraph-UI': '1' }, body: JSON.stringify({ document: { version: 1, symbols: [], cards: [], viewport: { x: 0, y: 0, zoom: 1 }, filters: { kind: '', showStructure: false } } }) });
+    assert.equal(resolved.status, 200);
+    assert.equal(fs.existsSync(path.join(nativeFixture, '.codegraph/ui/boards')), false);
+    console.log('live board: indexed selection, metadata-only read-only refusal and in-memory resolution passed');
+
     const prototype = await fetch(`${base}/board-prototype.html`);
     assert.equal(prototype.status, 200);
     const prototypeHtml = await prototype.text();
