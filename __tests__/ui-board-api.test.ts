@@ -7,12 +7,16 @@ import { createHash } from 'crypto';
 import CodeGraph from '../src/index';
 import { NODE_KINDS, EDGE_KINDS, type Node, type NodeKind, type EdgeKind } from '../src/types';
 import { createGraphApi, startUiServer, type GraphApi, type UiServerHandle } from '../src/ui-server';
-import { MAX_BOARD_SCOPE, MAX_BOARD_RELATIONS, MAX_BOARD_TARGET_EVIDENCE } from '../src/graph/board-projection';
+import { BoardGraph, MAX_BOARD_SCOPE, MAX_BOARD_RELATIONS, MAX_BOARD_TARGET_EVIDENCE } from '../src/graph/board-projection';
+import { DatabaseConnection, getDatabasePath } from '../src/db';
+import { QueryBuilder } from '../src/db/queries';
 
 let root: string;
 let server: UiServerHandle;
 let api: GraphApi;
 let evidenceIds: string[];
+let uncertainEvidenceIds: string[];
+let certainEvidenceIds: string[];
 let beforeFiles: string[];
 let beforeDb: string;
 const databaseHash = () => createHash('sha256').update(fs.readFileSync(path.join(root, '.codegraph/codegraph.db'))).digest('hex');
@@ -36,7 +40,9 @@ async function get(endpoint: string, params: Record<string, string | number> = {
   expect(res.status).toBe(200);
   return res.body;
 }
-const project = (ids: string[]) => get('/api/board', { ids: JSON.stringify(ids) });
+const project = (ids: string[], filters: Record<string, string | number> = {}) => get('/api/board', { ids: JSON.stringify(ids), ...filters });
+const groups = (params: Record<string, string | number>) => get('/api/board/groups', params);
+const members = (params: Record<string, string | number>) => get('/api/board/members', params);
 const connections = (params: Record<string, string | number>) => get('/api/board/connections', params);
 const search = (params: Record<string, string | number> = {}) => get('/api/board/search', params);
 
@@ -59,9 +65,9 @@ beforeAll(async () => {
   cg.resolveReferences();
   const queries = cg['queries'];
   const db = cg['db'].getDb();
-  const add = (id: string, kind: NodeKind = 'function', file = 'fixture/main.ts', name = id): void => {
+  const add = (id: string, kind: NodeKind = 'function', file = 'app/main.ts', name = id, line = 2, column = 0): void => {
     const node: Node = { id, kind, name, qualifiedName: `${file}::${name}`, filePath: file,
-      language: 'typescript', startLine: 2, endLine: 10, startColumn: 0, endColumn: 1 };
+      language: 'typescript', startLine: line, endLine: line + 8, startColumn: column, endColumn: 1 };
     queries.insertNode(node);
   };
   const edge = (source: string, target: string, kind: EdgeKind, line = 1, metadata?: Record<string, unknown>): void => {
@@ -111,10 +117,92 @@ beforeAll(async () => {
       add(`wide-${String(i).padStart(4, '0')}`, 'field', 'wide/contents.ts');
       edge('wide', `wide-${String(i).padStart(4, '0')}`, 'contains', i + 1);
     }
+    for (const suffix of ['a', 'b']) {
+      add(`wide-deep-target-${suffix}`, 'parameter', 'wide/nested.ts');
+      edge(`wide-${String(MAX_BOARD_SCOPE + 4).padStart(4, '0')}`, `wide-deep-target-${suffix}`, 'contains');
+    }
     for (let i = 0; i < 70; i++) {
       add(`deep-${i}`, 'namespace', 'deep/contents.ts');
       if (i) edge(`deep-${i - 1}`, `deep-${i}`, 'contains');
     }
+    // Folder previews include nested contents, all kinds, both generation
+    // signals, overlapping test/generated reasons, and literal path characters.
+    add('group-class', 'class', 'group-scope/main.ts');
+    add('group-fn', 'function', 'group-scope/nested/code.ts');
+    add('group-future', 'future_node' as NodeKind, 'group-scope/nested/code.ts');
+    add('group-test', 'method', 'group-scope/a.test.ts');
+    add('group-gen', 'field', 'group-scope/schema.pb.go');
+    add('group-content-gen', 'constant', 'group-scope/ordinary.ts');
+    add('group-both', 'function', 'group-scope/tests/schema.pb.go');
+    db.prepare(`INSERT INTO files(path, content_hash, language, size, modified_at, indexed_at, generated)
+      VALUES ('group-scope/ordinary.ts', 'fixture', 'typescript', 0, 0, 0, 1)`).run();
+    add('group-not-prefix', 'variable', 'group-scopeish/other.ts');
+    add('root-file', 'file', 'top.ts');
+    // Real namespace identities with repeated names and descendants in unrelated
+    // folders. Matching qualified-name prefixes without contains is insufficient.
+    add('ns-a', 'namespace', 'namespace/one.ts', 'Shared');
+    add('ns-b', 'namespace', 'namespace/two.ts', 'Shared');
+    add('ns-nested', 'namespace', 'unrelated/nested.ts', 'Inner');
+    add('ns-type', 'class', 'other-dir/type.ts', 'Container');
+    add('ns-run', 'method', 'other-dir/type.ts', 'run', 20);
+    add('ns-param', 'parameter', 'other-dir/type.ts', 'value', 20, 15);
+    add('ns-other-run', 'method', 'namespace/two.ts', 'run', 4);
+    add('ns-prefix-only', 'function', 'namespace/one.ts', 'Shared.fake');
+    add('ns-test', 'function', 'namespace/scope.test.ts');
+    edge('ns-a', 'ns-nested', 'contains'); edge('ns-nested', 'ns-type', 'contains');
+    edge('ns-type', 'ns-run', 'contains'); edge('ns-run', 'ns-param', 'contains');
+    edge('ns-a', 'ns-test', 'contains'); edge('ns-b', 'ns-other-run', 'contains');
+    // Filtered automatic members/edges, including a blocked ownership path and
+    // explicitly selected excluded identities that must never disappear.
+    add('filter-owner', 'class', 'filter-scope/main.ts');
+    add('filter-live', 'method', 'filter-scope/main.ts', 'filteredTwin', 30);
+    add('filter-test', 'method', 'filter-scope/a.test.ts', 'filteredTwin', 10);
+    add('filter-gen', 'field', 'filter-scope/schema.pb.go');
+    add('filter-content', 'property', 'filter-scope/ordinary.ts');
+    add('filter-both', 'constant', 'filter-scope/tests/schema.pb.go');
+    add('filter-weak', 'class', 'filter-scope/weak.ts');
+    add('filter-nested', 'method', 'filter-scope/nested.ts');
+    db.prepare(`INSERT INTO files(path, content_hash, language, size, modified_at, indexed_at, generated)
+      VALUES ('filter-scope/ordinary.ts', 'fixture', 'typescript', 0, 0, 0, 1)`).run();
+    for (const target of ['filter-live', 'filter-test', 'filter-gen', 'filter-content', 'filter-both']) edge('filter-owner', target, 'contains');
+    edge('filter-owner', 'filter-weak', 'contains', 1, { confidence: 0.5 });
+    edge('filter-weak', 'filter-nested', 'contains');
+    edge('filter-nested', 'filter-live', 'calls');
+    add('filter-test-root', 'module', 'filter-scope/owner.test.ts');
+    add('filter-under-test', 'function', 'filter-scope/child.ts');
+    edge('filter-test-root', 'filter-under-test', 'contains');
+    add('filter-origin', 'function', 'filter-scope/origin.ts');
+    for (const target of ['filter-live', 'filter-test', 'filter-gen', 'filter-content', 'filter-both']) {
+      edge('filter-origin', target, 'references', 1, { confidence: target === 'filter-both' ? 0.1 : 1 });
+    }
+    // Strong and weak evidence on the same target: counts are original sites,
+    // not max group confidence, and neither synthesis nor malformed metadata
+    // should accidentally turn a certain edge into a name-only guess.
+    add('uncertainty-root');
+    for (const target of ['mixed', 'low', 'name', 'name-high', 'heuristic', 'boundary', 'string', 'bool', 'invalid', 'exact']) add(`uncertainty-${target}`);
+    for (let i = 0; i < 60; i++) edge('uncertainty-root', 'uncertainty-mixed', 'calls', i + 1, { confidence: i < 45 ? 0.6 : 0.599 });
+    edge('uncertainty-root', 'uncertainty-low', 'calls', 1, { confidence: 0.599 });
+    edge('uncertainty-root', 'uncertainty-name', 'calls', 1, { resolvedBy: 'name-only' });
+    edge('uncertainty-root', 'uncertainty-name-high', 'calls', 1, { resolvedBy: 'name-only', confidence: 0.9 });
+    edge('uncertainty-root', 'uncertainty-heuristic', 'calls', 1, { synthesizedBy: 'fixture-bridge', registeredAt: 'app/wiring.ts:5' });
+    db.prepare("UPDATE edges SET provenance='heuristic' WHERE source='uncertainty-root' AND target='uncertainty-heuristic'").run();
+    edge('uncertainty-root', 'uncertainty-boundary', 'calls', 1, { confidence: 0.6 });
+    edge('uncertainty-root', 'uncertainty-string', 'calls', 1, { confidence: '0.1' });
+    edge('uncertainty-root', 'uncertainty-bool', 'calls', 1, { confidence: false });
+    edge('uncertainty-root', 'uncertainty-invalid', 'calls');
+    db.prepare("UPDATE edges SET metadata='{bad json' WHERE source='uncertainty-root' AND target='uncertainty-invalid'").run();
+    edge('uncertainty-root', 'uncertainty-exact', 'calls', 1, { resolvedBy: 'exact-match' });
+    // Deliberately shuffled insertion and same-name/same-line declarations.
+    add('outline-root', 'class', 'outline/main.ts');
+    add('outline-z', 'field', 'outline/main.ts', 'duplicate', 15);
+    add('outline-a', 'method', 'outline/main.ts', 'duplicate', 3, 4);
+    add('outline-b', 'property', 'outline/main.ts', 'duplicate', 3, 1);
+    for (const child of ['outline-z', 'outline-a', 'outline-b']) edge('outline-root', child, 'contains');
+    edge('outline-root', 'outline-z', 'contains', 2); // same child, two sites
+    edge('outline-a', 'ns-a', 'references');
+    add('all-kind-owner', 'module', 'outline/kinds.ts');
+    for (const kind of NODE_KINDS) edge('all-kind-owner', `kind-${kind}`, 'contains');
+    edge('all-kind-owner', 'future-node', 'contains');
     db.prepare(`INSERT INTO unresolved_refs(from_node_id, reference_name, reference_kind, line, col)
       VALUES ('member', 'uninstalledPackage', 'calls', 15, 2)`).run();
     // Simulate an older/imported corrupt index without inventing a node.
@@ -124,6 +212,8 @@ beforeAll(async () => {
   db.prepare("INSERT INTO edges(source,target,kind,line) VALUES ('member','outside-index','calls',16), ('missing-parent','orphan','contains',1), ('missing-parent','partially-ambiguous','contains',1)").run();
   db.pragma('foreign_keys = ON');
   evidenceIds = db.prepare("SELECT id FROM edges WHERE source='evidence-hub' ORDER BY id").all().map((r: any) => String(r.id));
+  uncertainEvidenceIds = db.prepare("SELECT id FROM edges WHERE source='uncertainty-root' AND target='uncertainty-mixed' ORDER BY id").all().map((r: any) => String(r.id));
+  certainEvidenceIds = uncertainEvidenceIds.slice(0, 45);
   cg.close();
   const viewer = path.join(root, 'viewer');
   fs.mkdirSync(viewer);
@@ -168,7 +258,7 @@ describe('Board selection and identity', () => {
   });
 
   it('includes bounded descendants and ancestors but never admits unselected neighbours', async () => {
-    const body = await project(['owner', 'same-a', 'owner', 'missing-id']);
+    const body = await project(['owner', 'same-a', 'owner', 'missing-id'], { uncertain: 1 });
     expect(body.included).toEqual(['owner', 'same-a']);
     expect(body.missing).toEqual(['missing-id']);
     const byId = new Map(body.symbols.map((s: any) => [s.id, s]));
@@ -253,6 +343,34 @@ describe('Board exact filtering and paging', () => {
   });
 });
 
+describe('Board search identity context', () => {
+  it('returns proven ancestors beyond projection scope while keeping only matches in the paged items', async () => {
+    const owner = `wide-${String(MAX_BOARD_SCOPE + 4).padStart(4, '0')}`;
+    const selection = await project(['wide']);
+    expect(selection.bounded).toBe(true);
+    expect(selection.symbols.some((s: any) => s.id === owner || s.id === 'wide-deep-target-a')).toBe(false);
+    const first = await search({ q: 'wide-deep-target', limit: 1 });
+    expect(first.total).toBe(2);
+    expect(first.nextOffset).toBe(1);
+    expect(first.items.map((s: any) => s.id)).toEqual(['wide-deep-target-a']);
+    expect(first.items[0].ownerId).toBe(owner);
+    expect(first.symbols.map((s: any) => s.id).sort()).toEqual(['wide', owner, 'wide-deep-target-a'].sort());
+    expect(first.symbols.find((s: any) => s.id === owner).ownerId).toBe('wide');
+    expect(first.symbols.some((s: any) => s.id === 'wide-deep-target-b')).toBe(false);
+    const second = await search({ q: 'wide-deep-target', offset: first.nextOffset, limit: 1 });
+    expect(second.total).toBe(2);
+    expect(second.items.map((s: any) => s.id)).toEqual(['wide-deep-target-b']);
+    expect(second.symbols.map((s: any) => s.id).sort()).toEqual(['wide', owner, 'wide-deep-target-b'].sort());
+    expect(second.nextOffset).toBeNull();
+    for (const page of [first, second]) {
+      const ids = new Set(page.symbols.map((s: any) => s.id));
+      for (const symbol of page.symbols) if (symbol.ownerId) expect(ids.has(symbol.ownerId)).toBe(true);
+    }
+    const empty = await search({ q: 'wide-deep-target', offset: 2 });
+    expect(empty).toMatchObject({ items: [], symbols: [], total: 2, nextOffset: null });
+  });
+});
+
 describe('Board Connections are independent of canvas membership', () => {
   it('discovers every kind in both directions, including contains and unselected test targets', async () => {
     for (const kind of EDGE_KINDS) {
@@ -260,7 +378,7 @@ describe('Board Connections are independent of canvas membership', () => {
       expect(outgoing.items.some((r: any) => r.target.id === `peer-${kind}`)).toBe(true);
       expect(outgoing.items.flatMap((r: any) => r.evidence).every((e: any) => e.kind === kind)).toBe(true);
       endpointsResolve(outgoing);
-      const incoming = await connections({ id: 'member', direction: 'incoming', kind });
+      const incoming = await connections({ id: 'member', direction: 'incoming', kind, tests: 1 });
       const hidden = incoming.items.find((r: any) => r.target.id === `incoming-${kind}`);
       expect(hidden.target.test).toBe(true);
       expect(hidden.evidence[0]).toMatchObject({ source: `incoming-${kind}`, target: 'member', kind, file: '__tests__/hidden.test.ts' });
@@ -272,14 +390,14 @@ describe('Board Connections are independent of canvas membership', () => {
   });
 
   it('discovers generated targets without canvas or reader-rail exclusions and labels generation', async () => {
-    const body = await connections({ id: 'member', q: 'generated/' });
+    const body = await connections({ id: 'member', q: 'generated/', generated: 1 });
     expect(body.items.map((r: any) => r.target.id).sort()).toEqual(['generated-content-peer', 'generated-peer']);
     expect(body.items.every((r: any) => r.target.generated === true)).toBe(true);
   });
 
   it('distinguishes member-only and recursive member scope with exact direction and original endpoint IDs', async () => {
     expect((await connections({ id: 'owner', members: 0, kind: 'calls' })).total).toBe(0);
-    const body = await connections({ id: 'owner', members: 1, kind: 'calls' });
+    const body = await connections({ id: 'owner', members: 1, kind: 'calls', uncertain: 1 });
     expect(body.withMembers).toBe(true);
     expect(body.total).toBe(3); // peer-calls + two identically named methods
     expect(body.items.every((r: any) => r.evidence.every((e: any) => e.source === 'member'))).toBe(true);
@@ -287,9 +405,9 @@ describe('Board Connections are independent of canvas membership', () => {
     expect(body.notes.join(' ')).toMatch(/1 indexed relationships/);
     const same = body.items.find((r: any) => r.target.id === 'same-a');
     expect(same.owner.id).toBe('same-owner');
-    expect(same.evidence[0]).toMatchObject({ kind: 'calls', confidence: 0.21, provenance: 'heuristic', synthesizedBy: 'fixture-callback', via: 'callback', registeredAt: 'fixture/wiring.ts:9', resolvedBy: 'name-only', line: 11, col: 3, file: 'fixture/main.ts' });
+    expect(same.evidence[0]).toMatchObject({ kind: 'calls', confidence: 0.21, provenance: 'heuristic', synthesizedBy: 'fixture-callback', via: 'callback', registeredAt: 'fixture/wiring.ts:9', resolvedBy: 'name-only', line: 11, col: 3, file: 'app/main.ts' });
     endpointsResolve(body);
-    const incoming = await connections({ id: 'owner', members: 1, direction: 'incoming', kind: 'calls' });
+    const incoming = await connections({ id: 'owner', members: 1, direction: 'incoming', kind: 'calls', tests: 1 });
     expect(incoming.items.map((r: any) => r.target.id)).toEqual(['incoming-calls']);
     endpointsResolve(incoming);
   });
@@ -310,7 +428,7 @@ describe('Board Connections are independent of canvas membership', () => {
     expect(new Set(collected).size).toBe(first.total);
     expect(collected).toHaveLength(first.total);
     expect((await connections({ id: 'member', q: '%_' })).total).toBe(0);
-    expect((await connections({ id: 'member', q: 'one/a.ts', kind: 'calls' })).items[0].target.id).toBe('same-a');
+    expect((await connections({ id: 'member', q: 'one/a.ts', kind: 'calls', uncertain: 1 })).items[0].target.id).toBe('same-a');
   });
 });
 
@@ -367,13 +485,287 @@ describe('Board caps and evidence drilling', () => {
   });
 
   it('shares member scope, filters and evidence IDs with connection drilling', async () => {
-    const conn = await connections({ id: 'owner', members: 1, kind: 'calls', q: 'Same' });
+    const conn = await connections({ id: 'owner', members: 1, kind: 'calls', q: 'Same', uncertain: 1 });
     expect(conn.total).toBe(2);
-    const body = await get('/api/board/evidence', { id: 'owner', target: 'same-a', members: 1, kind: 'calls', q: 'Same' });
+    const body = await get('/api/board/evidence', { id: 'owner', target: 'same-a', members: 1, kind: 'calls', q: 'Same', uncertain: 1 });
     expect(body.items).toEqual(conn.items.find((r: any) => r.target.id === 'same-a').evidence);
     endpointsResolve(body);
     expect((await get('/api/board/evidence', { id: 'owner', target: 'same-a', members: 0, kind: 'calls' })).total).toBe(0);
     expect((await get('/api/board/evidence', { id: 'owner', target: 'same-a', members: 1, kind: 'references' })).total).toBe(0);
+  });
+});
+
+describe('Board default visibility filters and exact exclusion counts', () => {
+  it('filters discovery by both generation signals and the shared test/non-production predicate', async () => {
+    const defaults = await search({ path: 'group-scope' });
+    expect(defaults.total).toBe(3);
+    expect(defaults.items.map((s: any) => s.id).sort()).toEqual(['group-class', 'group-fn', 'group-future']);
+    expect(defaults.excluded).toEqual({ symbols: { tests: 2, generated: 2, uncertain: 0 }, relations: { tests: 0, generated: 0, uncertain: 0 } });
+    expect(defaults.notes.join(' ')).toMatch(/exact before paging/);
+    const tests = await search({ path: 'group-scope', tests: 1, limit: 1 });
+    expect(tests.total).toBe(4);
+    expect(tests.excluded.symbols).toEqual({ tests: 0, generated: 3, uncertain: 0 });
+    const generated = await search({ path: 'group-scope', generated: 1 });
+    expect(generated.total).toBe(5);
+    expect(generated.excluded.symbols).toEqual({ tests: 2, generated: 0, uncertain: 0 });
+    const all = await search({ path: 'group-scope', generated: 1, tests: 1 });
+    expect(all.total).toBe(7);
+    expect(all.items.filter((s: any) => s.generated).map((s: any) => s.id).sort()).toEqual(['group-both', 'group-content-gen', 'group-gen']);
+    expect(all.items.filter((s: any) => s.test).map((s: any) => s.id).sort()).toEqual(['group-both', 'group-test']);
+    // Existing `fixture/`/examples classification must remain shared with the wire badge.
+    expect((await search({ q: 'incoming-', tests: 0 })).total).toBe(0);
+    expect((await search({ q: 'incoming-', tests: 1 })).total).toBe(EDGE_KINDS.length);
+  });
+
+  it('retains explicit selections but filters automatic members and all their relationships', async () => {
+    const selected = await project(['filter-owner']);
+    expect(selected.symbols.map((s: any) => s.id).sort()).toEqual(['filter-live', 'filter-owner']);
+    expect(selected.symbols.find((s: any) => s.id === 'filter-owner').memberCount).toBe(1);
+    expect(selected.excluded.symbols).toEqual({ tests: 2, generated: 2, uncertain: 2 });
+    expect(selected.excluded.relations).toEqual({ tests: 2, generated: 2, uncertain: 3 });
+    expect(selected.relations.map((e: any) => e.target)).toEqual(['filter-live']);
+    const explicit = await project(['filter-owner', 'filter-test', 'filter-gen', 'filter-weak']);
+    expect(explicit.included).toEqual(['filter-owner', 'filter-test', 'filter-gen', 'filter-weak']);
+    for (const id of explicit.included) expect(explicit.symbols.some((s: any) => s.id === id)).toBe(true);
+    expect(explicit.symbols.some((s: any) => s.id === 'filter-nested')).toBe(true); // independently pinned owner
+    expect(explicit.relations.some((e: any) => e.target === 'filter-test' || e.target === 'filter-gen')).toBe(false);
+    const testRoot = await project(['filter-test-root']);
+    expect(testRoot.included).toEqual(['filter-test-root']);
+    expect(testRoot.symbols.map((s: any) => s.id)).toEqual(['filter-test-root']);
+    expect(testRoot.symbols[0].memberCount).toBe(0);
+    const all = await project(['filter-owner'], { tests: 1, generated: 1, uncertain: 1 });
+    expect(all.symbols).toHaveLength(8);
+    expect(all.symbols.find((s: any) => s.id === 'filter-owner').memberCount).toBe(6);
+    expect(all.excluded.symbols).toEqual({ tests: 0, generated: 0, uncertain: 0 });
+  });
+
+  it('separates eligible scope IDs from filtered ancestors retained only as identity context', async () => {
+    const body = await project(['filter-owner', 'filter-nested']);
+    expect(new Set(body.scopeIds)).toEqual(new Set(['filter-owner', 'filter-live', 'filter-nested']));
+    expect(body.symbols.find((s: any) => s.id === 'filter-nested').ownerId).toBe('filter-weak');
+    expect(body.symbols.some((s: any) => s.id === 'filter-weak')).toBe(true);
+    for (const id of ['filter-weak', 'filter-test', 'filter-gen', 'filter-content', 'filter-both']) expect(body.scopeIds).not.toContain(id);
+    const explicit = await project(['filter-owner', 'filter-test']);
+    expect(explicit.scopeIds).toContain('filter-test'); // explicit cards still survive the filter
+    expect(explicit.scopeIds).not.toContain('filter-both');
+    expect((await project([])).scopeIds).toEqual([]);
+  });
+
+  it('keeps counts disjoint for overlapping reasons and applies identical filters in both directions and evidence', async () => {
+    const page = await connections({ id: 'filter-origin', kind: 'references', limit: 1 });
+    expect(page.total).toBe(1);
+    expect(page.nextOffset).toBeNull();
+    expect(page.excluded).toEqual({ symbols: { tests: 2, generated: 2, uncertain: 0 }, relations: { tests: 2, generated: 2, uncertain: 0 } });
+    const both = await get('/api/board/evidence', { id: 'filter-origin', target: 'filter-both', kind: 'references' });
+    expect(both.total).toBe(0);
+    expect(both.excluded.relations).toEqual({ tests: 1, generated: 0, uncertain: 0 });
+    expect(both.symbols.some((s: any) => s.id === 'filter-both')).toBe(true); // explicit identity context
+    const generation = await get('/api/board/evidence', { id: 'filter-origin', target: 'filter-both', tests: 1 });
+    expect(generation.excluded.relations).toEqual({ tests: 0, generated: 1, uncertain: 0 });
+    const uncertain = await get('/api/board/evidence', { id: 'filter-origin', target: 'filter-both', tests: 1, generated: 1 });
+    expect(uncertain.excluded.relations).toEqual({ tests: 0, generated: 0, uncertain: 1 });
+    const visible = await get('/api/board/evidence', { id: 'filter-origin', target: 'filter-both', tests: 1, generated: 1, uncertain: 1 });
+    expect(visible.total).toBe(1);
+    const reverse = await connections({ id: 'filter-both', direction: 'incoming', kind: 'references' });
+    expect(reverse.total).toBe(0);
+    expect(reverse.excluded.relations.tests).toBe(1);
+    expect((await connections({ id: 'filter-both', direction: 'incoming', kind: 'references', tests: 1, generated: 1, uncertain: 1 })).total).toBe(1);
+    const canvas = await project(['filter-origin', 'filter-live', 'filter-test', 'filter-gen', 'filter-content', 'filter-both']);
+    expect(canvas.relations.map((e: any) => e.id)).toEqual(page.items[0].evidence.map((e: any) => e.id));
+    expect(canvas.excluded.relations).toEqual(page.excluded.relations);
+  });
+
+  it('filters original weak sites, not whole mixed-confidence targets, and preserves exact evidence paging', async () => {
+    const conn = await connections({ id: 'uncertainty-root', kind: 'calls' });
+    expect(conn.total).toBe(7);
+    expect(conn.excluded).toEqual({ symbols: { tests: 0, generated: 0, uncertain: 3 }, relations: { tests: 0, generated: 0, uncertain: 18 } });
+    const mixed = conn.items.find((r: any) => r.target.id === 'uncertainty-mixed');
+    expect(mixed.total).toBe(45);
+    expect(mixed.evidence).toHaveLength(MAX_BOARD_TARGET_EVIDENCE);
+    const heuristic = conn.items.find((r: any) => r.target.id === 'uncertainty-heuristic');
+    expect(heuristic.evidence[0]).toMatchObject({ provenance: 'heuristic', synthesizedBy: 'fixture-bridge', registeredAt: 'app/wiring.ts:5' });
+    expect(conn.items.some((r: any) => r.target.id === 'uncertainty-boundary')).toBe(true); // exactly .6
+    for (const suffix of ['string', 'bool', 'invalid', 'exact']) expect(conn.items.some((r: any) => r.target.id === `uncertainty-${suffix}`)).toBe(true);
+    const ids: string[] = [];
+    let offset: number | null = 0;
+    while (offset !== null) {
+      const page = await get('/api/board/evidence', { id: 'uncertainty-root', target: 'uncertainty-mixed', offset, limit: 13 });
+      expect(page.total).toBe(45);
+      expect(page.excluded.relations.uncertain).toBe(15);
+      expect(page.excluded.symbols.uncertain).toBe(0); // mixed target is still visible
+      endpointsResolve(page);
+      ids.push(...page.items.map((e: any) => e.id));
+      offset = page.nextOffset;
+    }
+    expect(ids).toEqual(certainEvidenceIds);
+    const all = await get('/api/board/evidence', { id: 'uncertainty-root', target: 'uncertainty-mixed', uncertain: 1 });
+    expect(all.items.map((e: any) => e.id)).toEqual(uncertainEvidenceIds);
+    expect(all.total).toBe(60);
+    const reverse = await get('/api/board/evidence', { id: 'uncertainty-mixed', target: 'uncertainty-root', direction: 'incoming', offset: 40, limit: 10 });
+    expect(reverse.items.map((e: any) => e.id)).toEqual(certainEvidenceIds.slice(40));
+    expect(reverse.total).toBe(45);
+    const peers = await connections({ id: 'uncertainty-root', uncertain: 1 });
+    expect(peers.total).toBe(10);
+    expect(peers.excluded.relations.uncertain).toBe(0);
+    const canvas = await project(['uncertainty-root', ...peers.items.map((r: any) => r.target.id)]);
+    expect(canvas.included).toHaveLength(11); // excluded edges never remove selected cards
+    expect(canvas.relations.map((e: any) => e.id).sort()).toEqual(conn.items.flatMap((r: any) => r.evidence.map((e: any) => e.id)).concat(certainEvidenceIds.slice(40)).sort());
+    expect(canvas.excluded.relations).toEqual(conn.excluded.relations);
+  });
+});
+
+describe('Board indexed folder and namespace groups', () => {
+  it('previews all kinds with exact filtered subtree totals, not filesystem folders or prefix siblings', async () => {
+    const page = await groups({ type: 'folder', q: 'group-scope', limit: 1 });
+    expect(page.total).toBe(3); // scope, nested, and scopeish; test-only folder hidden
+    expect(page.nextOffset).toBe(1);
+    expect(page.bounded).toBe(false);
+    const group = page.items[0];
+    expect(group).toMatchObject({ id: 'folder:group-scope', type: 'folder', name: 'group-scope', path: 'group-scope', total: 3 });
+    expect(group.byKind).toEqual([{ kind: 'class', count: 1 }, { kind: 'function', count: 1 }, { kind: 'future_node', count: 1 }]);
+    expect(group.total).toBe((await search({ path: group.path })).total);
+    expect(page.excluded.symbols).toEqual({ tests: 2, generated: 2, uncertain: 0 });
+    const all = await groups({ type: 'folder', q: 'group-scope', tests: 1, generated: 1 });
+    expect(all.total).toBe(4);
+    expect(all.items.find((g: any) => g.path === 'group-scope').total).toBe(7);
+    for (const item of all.items) {
+      const enumeration = await search({ path: item.path, tests: 1, generated: 1 });
+      expect(item.total).toBe(enumeration.total);
+      expect(item.byKind.reduce((sum: number, k: any) => sum + k.count, 0)).toBe(item.total);
+    }
+    const paths: string[] = [];
+    let offset: number | null = 0;
+    while (offset !== null) {
+      const nextPage = await groups({ type: 'folder', q: 'group-scope', offset, limit: 1 });
+      expect(nextPage.total).toBe(page.total);
+      paths.push(...nextPage.items.map((g: any) => g.path));
+      offset = nextPage.nextOffset;
+    }
+    expect(new Set(paths).size).toBe(page.total);
+    expect((await groups({ type: 'folder', q: 'literal%_' })).items.map((g: any) => g.path)).toEqual(['literal%_']);
+    expect((await groups({ type: 'folder', q: "' OR 1=1 --" })).total).toBe(0);
+    const rootGroup = (await groups({ type: 'folder', limit: 100 })).items.find((g: any) => g.path === '');
+    expect(rootGroup.total).toBe((await search()).total);
+    expect((await groups({ type: 'folder', q: 'group-scope', offset: 999 })).nextOffset).toBeNull();
+  });
+
+  it('uses real namespace ancestors for labels, scope and previews across folders with repeated names', async () => {
+    const page = await groups({ type: 'namespace', q: 'Shared' });
+    expect(page.items.map((g: any) => g.id)).toEqual(['ns-a', 'ns-b']);
+    expect(page.items.map((g: any) => g.total)).toEqual([5, 2]);
+    expect(page.items[0].namespace).toBe('ns-a');
+    expect(page.items[0].path).toBe('namespace/one.ts');
+    expect(page.items[0].byKind).toEqual([{ kind: 'class', count: 1 }, { kind: 'method', count: 1 }, { kind: 'namespace', count: 2 }, { kind: 'parameter', count: 1 }]);
+    const scoped = await search({ namespace: 'ns-a', limit: 2 });
+    expect(scoped.total).toBe(5);
+    expect(scoped.nextOffset).toBe(2);
+    const all = await search({ namespace: 'ns-a', tests: 1 });
+    expect(all.total).toBe(6);
+    expect(all.items.map((s: any) => s.id).sort()).toEqual(['ns-a', 'ns-nested', 'ns-param', 'ns-run', 'ns-test', 'ns-type']);
+    const repeated = await search({ namespace: 'ns-a', q: 'run', kind: 'method' });
+    expect(repeated.items.map((s: any) => s.id)).toEqual(['ns-run']);
+    expect(repeated.items[0]).toMatchObject({ ownerId: 'ns-type', namespace: 'unrelated/nested.ts::Inner' });
+    expect((await search({ namespace: 'ns-b', kind: 'method' })).items.map((s: any) => s.id)).toEqual(['ns-other-run']);
+    expect((await search({ namespace: 'ns-a', path: 'other-dir' })).total).toBe(3);
+    expect((await groups({ type: 'namespace', q: 'group-scope' })).total).toBe(0); // no fake folder namespaces
+    expect((await groups({ type: 'namespace', q: 'Shared', limit: 1, offset: 1 })).items[0].id).toBe('ns-b');
+    expect((await groups({ type: 'namespace', q: 'Shared', tests: 1 })).items[0].total).toBe(all.total);
+    const deep = await groups({ type: 'namespace', q: 'deep-0' });
+    expect(deep.items[0].total).toBe(70); // previews/enumeration are not projection-capped
+    expect((await search({ namespace: 'deep-0' })).total).toBe(70);
+  });
+});
+
+describe('Board direct member paging and filter-aware counts', () => {
+  it('uses deterministic declaration source order and distinct direct children, not recursive scope', async () => {
+    const first = await members({ id: 'outline-root', limit: 2 });
+    expect(first.items.map((s: any) => s.id)).toEqual(['outline-b', 'outline-a']);
+    expect(first.items.map((s: any) => [s.line, s.startColumn])).toEqual([[3, 1], [3, 4]]);
+    expect(first.symbols.find((s: any) => s.id === 'outline-a').startColumn).toBe(4);
+    expect(first.total).toBe(3);
+    expect(first.nextOffset).toBe(2);
+    expect(first.symbols.find((s: any) => s.id === 'outline-root').memberCount).toBe(3);
+    const second = await members({ id: 'outline-root', offset: first.nextOffset, limit: 2 });
+    expect(second.items.map((s: any) => s.id)).toEqual(['outline-z']);
+    expect(second.nextOffset).toBeNull();
+    const snapshot = await project(['outline-root']);
+    const sourceOrdered = snapshot.symbols.filter((s: any) => s.ownerId === 'outline-root')
+      .sort((a: any, b: any) => a.line - b.line || a.startColumn - b.startColumn || a.id.localeCompare(b.id));
+    expect(sourceOrdered.map((s: any) => s.id)).toEqual(['outline-b', 'outline-a', 'outline-z']);
+    expect((await search({ path: 'outline', q: 'duplicate' })).items.map((s: any) => s.startColumn)).toEqual([1, 4, 0]);
+    expect((await connections({ id: 'outline-root', kind: 'contains' })).items.map((r: any) => r.target.startColumn)).toEqual([1, 4, 0]);
+    const kinds = await members({ id: 'all-kind-owner' });
+    expect(new Set(kinds.items.map((s: any) => s.kind))).toEqual(new Set([...NODE_KINDS, 'future_node']));
+    const nested = await members({ id: 'ns-run' });
+    expect(nested.items.map((s: any) => s.id)).toEqual(['ns-param']);
+    const byId = new Map(nested.symbols.map((s: any) => [s.id, s]));
+    for (const id of ['ns-run', 'ns-type', 'ns-nested', 'ns-a']) expect(byId.has(id)).toBe(true);
+    expect(nested.items[0]).toMatchObject({ ownerId: 'ns-run', namespace: 'unrelated/nested.ts::Inner' });
+    expect((await members({ id: 'ns-param' })).items).toEqual([]);
+    expect((await members({ id: 'outline-root', offset: 99 })).nextOffset).toBeNull();
+  });
+
+  it('pages members beyond the projection selection scope cap', async () => {
+    const page = await members({ id: 'wide', offset: MAX_BOARD_SCOPE - 1 });
+    expect(page.total).toBe(MAX_BOARD_SCOPE + 5);
+    expect(page.items.map((s: any) => s.id)).toEqual(Array.from({ length: 6 }, (_, i) => `wide-${String(MAX_BOARD_SCOPE - 1 + i).padStart(4, '0')}`));
+    expect(page.nextOffset).toBeNull();
+    expect(page.bounded).toBe(false);
+    const ids = new Set(page.symbols.map((s: any) => s.id));
+    for (const child of page.items) expect(ids.has(child.ownerId)).toBe(true);
+  });
+
+  it('aligns filtered memberCount across projection, search, Connections and member paging', async () => {
+    const page = await members({ id: 'filter-owner' });
+    expect(page.total).toBe(1);
+    expect(page.items.map((s: any) => s.id)).toEqual(['filter-live']);
+    expect(page.excluded.symbols).toEqual({ tests: 2, generated: 2, uncertain: 1 });
+    const owner = page.symbols.find((s: any) => s.id === 'filter-owner');
+    expect(owner.memberCount).toBe(page.total);
+    expect((await search({ q: 'filter-owner' })).items[0].memberCount).toBe(page.total);
+    expect((await project(['filter-owner'])).symbols.find((s: any) => s.id === 'filter-owner').memberCount).toBe(page.total);
+    expect((await connections({ id: 'filter-owner', kind: 'contains' })).scope.memberCount).toBe(page.total);
+    const all = await members({ id: 'filter-owner', tests: 1, generated: 1, uncertain: 1 });
+    expect(all.total).toBe(6);
+    expect(all.symbols.find((s: any) => s.id === 'filter-owner').memberCount).toBe(6);
+    expect((await members({ id: 'filter-test-root' })).total).toBe(0);
+    expect((await members({ id: 'filter-test-root', tests: 1 })).total).toBe(1);
+  });
+});
+
+describe('Board snapshot consistency', () => {
+  it('keeps counts, file classification, pages and facts in one snapshot and refreshes on the next request', () => {
+    const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-board-snapshot-'));
+    const cg = CodeGraph.initSync(projectRoot);
+    let writer: DatabaseConnection | undefined;
+    try {
+      const node: Node = { id: 'snapshot-owner', kind: 'module', name: 'snapshot-owner', qualifiedName: 'snapshot-owner', filePath: 'live.ts',
+        language: 'typescript', startLine: 1, endLine: 10, startColumn: 0, endColumn: 1 };
+      cg['queries'].insertNode(node);
+      cg['queries'].insertNode({ ...node, id: 'snapshot-child', name: 'child', qualifiedName: 'child' });
+      cg['queries'].insertEdge({ source: node.id, target: 'snapshot-child', kind: 'contains' });
+      cg['db'].getDb().prepare(`INSERT INTO files(path,content_hash,language,size,modified_at,indexed_at) VALUES ('live.ts','x','typescript',0,0,0)`).run();
+      writer = DatabaseConnection.open(getDatabasePath(projectRoot));
+      const graph = new BoardGraph(cg);
+      graph.snapshot(() => {
+        expect(graph.search('', undefined, undefined, 0, 10).total).toBe(2);
+        writer!.getDb().prepare("UPDATE files SET generated=1 WHERE path='live.ts'").run();
+        new QueryBuilder(writer!.getDb()).insertNode({ ...node, id: 'snapshot-new', name: 'new', qualifiedName: 'new' });
+        expect(graph.search('', undefined, undefined, 0, 10).total).toBe(2);
+        expect(graph.members(node.id, 0, 50, {}).total).toBe(1);
+        expect(graph.facts([node.id], []).facts.get(node.id)!.memberCount).toBe(1);
+      });
+      graph.snapshot(() => {
+        const current = graph.search('', undefined, undefined, 0, 10);
+        expect(current.total).toBe(0);
+        expect(current.excluded.generated).toBe(3);
+        expect(graph.members(node.id, 0, 50, {}).total).toBe(0);
+        expect(graph.facts([node.id], []).facts.get(node.id)!.memberCount).toBe(0);
+        expect(graph.search('', undefined, undefined, 0, 10, { includeGenerated: true }).total).toBe(3);
+      });
+    } finally {
+      writer?.close(); cg.close(); fs.rmSync(projectRoot, { recursive: true, force: true });
+    }
   });
 });
 
@@ -390,6 +782,18 @@ describe('Board validation and read-only boundary', () => {
     ['/api/board/connections', {}], ['/api/board/connections', { id: 'owner', direction: 'sideways' }],
     ['/api/board/connections', { id: 'owner', members: 'true' }],
     ['/api/board/evidence', { id: 'owner' }], ['/api/board/evidence', { id: 'owner', target: 'same-a', limit: 201 }],
+    ['/api/board', { ids: '[]', tests: 'true' }], ['/api/board', { ids: '[]', generated: '' }],
+    ['/api/board/search', { uncertain: '2' }], ['/api/board/search?tests=1&tests=0', {}],
+    ['/api/board/search', { namespace: '\u0000' }],
+    ['/api/board/groups', {}], ['/api/board/groups', { type: 'directory' }],
+    ['/api/board/groups', { type: 'folder', tests: 'yes' }], ['/api/board/groups', { type: 'namespace', generated: '-1' }],
+    ['/api/board/groups', { type: 'folder', limit: 101 }], ['/api/board/groups', { type: 'folder', q: '\u0000' }],
+    ['/api/board/groups?type=folder&type=namespace', {}], ['/api/board/groups', { type: 'folder', projectPath: '/elsewhere' }],
+    ['/api/board/members', {}], ['/api/board/members', { id: 'owner', uncertain: 'true' }],
+    ['/api/board/members', { id: 'owner', limit: 0 }], ['/api/board/members', { id: 'owner', offset: -1 }],
+    ['/api/board/members', { id: 'owner', root: '/elsewhere' }],
+    ['/api/board/connections', { id: 'owner', generated: 'true' }],
+    ['/api/board/evidence', { id: 'owner', target: 'member', uncertain: '' }],
   ])('rejects invalid requests: %s %j', async (endpoint, params) => {
     expect((await request(endpoint as string, params as Record<string, string>)).status).toBe(400);
   });
@@ -397,12 +801,18 @@ describe('Board validation and read-only boundary', () => {
   it('returns not-found for missing scopes without fuzzy/name fallback', async () => {
     expect((await request('/api/board/connections', { id: 'Same' })).status).toBe(404);
     expect((await request('/api/board/evidence', { id: 'owner', target: 'gone' })).status).toBe(404);
+    expect((await request('/api/board/members', { id: 'gone' })).status).toBe(404);
+    expect((await request('/api/board/search', { namespace: 'gone' })).status).toBe(404);
+    expect((await request('/api/board/search', { namespace: 'owner' })).status).toBe(404);
+    expect((await request('/api/board/search', { namespace: "' OR 1=1 --" })).status).toBe(404);
   });
 
   it('supports HEAD, advertises read endpoints and never creates board metadata', async () => {
     expect((await request('/api/board', { ids: '[]' }, 'HEAD')).status).toBe(200);
+    expect((await request('/api/board/groups', { type: 'folder' }, 'HEAD')).status).toBe(200);
+    expect((await request('/api/board/members', { id: 'owner' }, 'HEAD')).status).toBe(200);
     const index = await get('/api');
-    expect(index.endpoints.map((e: any) => e.path)).toEqual(expect.arrayContaining(['/api/board', '/api/board/search', '/api/board/connections', '/api/board/evidence']));
+    expect(index.endpoints.map((e: any) => e.path)).toEqual(expect.arrayContaining(['/api/board', '/api/board/search', '/api/board/groups', '/api/board/members', '/api/board/connections', '/api/board/evidence']));
     const refused = await request('/api/board', { ids: '[]' }, 'POST');
     expect(refused.status).not.toBe(200);
     expect(fs.existsSync(path.join(root, '.codegraph/ui/boards'))).toBe(false);
