@@ -108,10 +108,10 @@ satisfy that rule. Existing Map, Symbol, Flow and other reader views keep their
 contracts. Reuse their graph APIs, source/highlight/drift handling, theme,
 navigation and renderer wherever suitable; the exception does not relax security,
 read-only semantics or truthful graph evidence. The isolated sample-data
-clickdummy at `ui/board-prototype.html` is implemented; the all-kind/Connections
-prototype revision, live-index board and persistence remain planned. Keep the
-prototype out of the reusable UI package, and do not describe it or the Nix
-packaging commit as delivering the full feature.
+clickdummy at `ui/board-prototype.html` implements all-kind sample cards and
+Connections-based inclusion/restoration; live-index/API integration and persistence
+remain planned. Keep the prototype out of the reusable UI package, and do not
+describe it or the Nix packaging commit as delivering the full feature.
 
 ### NodeKind / EdgeKind
 

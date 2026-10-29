@@ -1,8 +1,8 @@
 # Local Review Board: design and implementation plan
 
-Status: first sample-data clickdummy implemented. Review feedback revises the
-design to all indexed node/edge kinds and explicit Connections-based inclusion;
-these revisions, the live-index board and persistence are not implemented yet.
+Status: revised sample-data clickdummy implemented with all node/edge kinds,
+explicit Connections-based inclusion, independently pinned members and hidden
+item recovery. Live-index/API integration and persistence are not implemented yet.
 
 This is a deliberate local extension of `codegraph ui`, not a replacement for
 Map, Symbol, Flow, Screens or Steps. The source-built Nix package carries the
@@ -221,8 +221,9 @@ information; exporting is explicit, not network publication.
 ### 0. Interaction clickdummy (implemented; review before live integration)
 
 `ui/board-prototype.html` is a separate entry that mounts neither the live App
-nor its graph adapter. It uses ten synthetic classes, source snippets, a cycle
-and an explicitly labelled interface bridge. Nothing is persisted. It reuses
+nor its graph adapter. Its mixed-symbol fixture covers every current node/edge
+kind plus unknown-kind fallbacks, source/metadata cards, a callback cycle and
+separate interface/implementation identities. Nothing is persisted. It reuses
 Svelte Flow, kind glyphs, SourceBlock and the viewer theme, and is pruned from
 the reusable UI library package.
 
@@ -235,17 +236,21 @@ nix develop -c bash -c 'cd ui && node node_modules/vite/bin/vite.js --host 127.0
 # Open http://127.0.0.1:5176/board-prototype.html
 ```
 
-Review selection/promotion, context filtering, dragging, method expansion,
-edge-evidence comparison and multiple movable/resizable source cards before
+Review explicit target selection, kind/direction filters, dragging, member
+expansion, typed evidence, restoration and movable/resizable source cards before
 implementing the real data projection. Use the prototype to revise interactions;
 do not treat its hard-coded positions, fixture graph or display counts as a
 production graph/layout implementation. Its HTTP packaging and model tests do
 not substitute for actual browser interaction checks.
 
-Next prototype revision: exercise the all-kind card families and typed Connections
-browser, explicit target/member inclusion, Locate, named hidden items and Undo /
-Restore with automatic context off. The first class/call fixture is historical UX
-evidence, not a constraint on the revised design or proof of complete kind support.
+The revised prototype includes the all-kind card families and typed Connections
+browser, individual/batch target inclusion, independently pinned members, Locate,
+named Hidden items and Undo/Restore. No automatic context is admitted. Kind gallery
+explicitly selects one representative of each kind plus an unknown-kind fallback;
+the normal example starts with just three chosen classes. Parallel relation kinds
+use separate labelled lanes and ownership arrows are opt-in. Catalogue/model tests
+cover all kinds; browser checks are still required for interactions. This remains
+a synthetic clickdummy, not proof of live-index/API completeness.
 
 ### 1. Read-only symbol projection and evidence
 

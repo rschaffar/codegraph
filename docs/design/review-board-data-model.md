@@ -1,8 +1,9 @@
 # Review Board: graph model and complete kind coverage
 
-Status: design requirement, not implemented coverage. Companion to
-[the Review Board plan](review-board-plan.md). The current clickdummy still uses
-classes and sample calls; it is not an exhaustive representation of this model.
+Status: the sample-data clickdummy exercises this kind inventory and explicit
+Connections workflow. Companion to [the Review Board plan](review-board-plan.md).
+Live-index/API integration and persistence remain planned; fixture coverage is
+not proof of production extraction accuracy or completeness.
 
 ## Engine model versus board presentation
 
@@ -133,5 +134,5 @@ Acceptance must compare the Board's supported-kind inventory to `NODE_KINDS` and
 `EDGE_KINDS`, exercise all 23/13 kinds with generic fixtures, and test unknown-kind
 fallbacks. Test each relation in both directions, folded and independently pinned
 endpoints, parallel kinds between a pair, member/type scope, paging, filters and
-hide/restore with automatic context off. Do not claim production completeness
-from the current class/call-only clickdummy.
+hide/restore with automatic context off. The mixed-kind clickdummy validates
+presentation and fixture semantics, not production extraction or live API completeness.
