@@ -12,6 +12,7 @@
   import FlowView from './views/FlowView.svelte';
   import EntryView from './views/EntryView.svelte';
   import DeadCodeView from './views/DeadCodeView.svelte';
+  import ReviewBoardView from './views/ReviewBoardView.svelte';
   import NotFoundView from './views/NotFoundView.svelte';
   import Toast from './components/Toast.svelte';
   import {
@@ -68,6 +69,8 @@
   let topbar: TopBar | null = $state(null);
 
   let route = $derived(router.route);
+  let boardOpened = $state(false);
+  $effect(() => { if (route.view === 'board') boardOpened = true; });
 
   // An app with screens opens on them. The Symbol tab's empty state is for a
   // library, where there is nothing to draw until a name is typed; a project
@@ -158,7 +161,10 @@
 <TopBar bind:this={topbar} project={project.name} stats={project.summary} showScreens={hasScreens} />
 <TrailBar />
 <main>
-  {#if route.view === 'symbol' && route.id !== null}
+  {#if boardOpened}<div class="board-host" hidden={route.view !== 'board'}><ReviewBoardView /></div>{/if}
+  {#if route.view === 'board'}
+    <!-- Keep the board mounted across reader navigation, preserving unsaved work. -->
+  {:else if route.view === 'symbol' && route.id !== null}
     <SymbolView id={route.id} line={route.line} />
   {:else if route.view === 'file' && route.source}
     <FileCodeView path={route.path} line={route.line} />
@@ -195,6 +201,8 @@
   /* The shell grid lives on #app (index.html's mount host) in app.css —
      Svelte's scoped styles cannot reach an element this component does not
      render. Only <main>, which it does render, is styled here. */
+  .board-host { height: 100%; }
+  .board-host[hidden] { display: none; }
   main {
     /* min-height:0 lets the row shrink so the view, not the page, scrolls. */
     min-height: 0;

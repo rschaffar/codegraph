@@ -79,6 +79,7 @@ export type Route =
       /** An encoded trail, read as a flow. Same format the `t` param uses. */
       trail: string | null;
     }
+  | { view: 'board' }
   | { view: 'entry' }
   | { view: 'screens' }
   | {
@@ -156,6 +157,8 @@ export function parseHash(hash: string): RouterLocation {
       depth: Number.isFinite(depth) && depth >= 1 && depth <= 4 ? depth : null,
       tests: params.get('tests') === '1',
     };
+  } else if (head === 'board' && rest.length === 0) {
+    route = { view: 'board' };
   } else if (head === 'entry' && rest.length === 0) {
     route = { view: 'entry' };
   } else if (head === 'screens' && rest.length === 0) {

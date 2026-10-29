@@ -68,7 +68,13 @@ project without changing its index or saving trails:
 CODEGRAPH_UI=1 ./result/bin/codegraph ui /absolute/path/to/project --read-only
 ```
 
-The local review-board clickdummy is available at `/board-prototype.html` on
+The **Board** tab (`#/board`) reads the served project's real index. Use Add
+symbols, then Connections to include only chosen targets. In normal mode, named
+boards save metadata under `.codegraph/ui/boards/`; `--read-only` allows exploring
+and loading, but refuses saving/deleting. Neither mode edits source, the index
+or Git state. Run without `--read-only` when you want to save boards.
+
+The review-board clickdummy remains available at `/board-prototype.html` on
 that viewer's URL. It is an isolated, session-only synthetic example, not a view
 of the indexed project. See [its design plan and development instructions](docs/design/review-board-plan.md#0-interaction-clickdummy-implemented-review-before-live-integration).
 

@@ -1,9 +1,10 @@
 # Review Board: graph model and complete kind coverage
 
-Status: the sample-data clickdummy exercises this kind inventory and explicit
-Connections workflow. Companion to [the Review Board plan](review-board-plan.md).
-Live-index/API integration and persistence remain planned; fixture coverage is
-not proof of production extraction accuracy or completeness.
+Status: both the sample-data clickdummy and first single-project live Board
+support this kind inventory and explicit Connections workflow. Companion to
+[the Review Board plan](review-board-plan.md), which records the implemented slice,
+bounds and remaining acceptance. All-kind presentation does not guarantee that
+all language extractors discover every real relationship.
 
 ## Engine model versus board presentation
 
@@ -24,9 +25,11 @@ current local revision there are 23 node kinds and 13 edge kinds.
   reviewer-owned selection, folding, filters, geometry, source cards and viewport;
   those presentation choices are not changes to the indexed graph.
 
-Project identity scopes symbols on a multi-project board. Folders/project groups
-are selection or layout conveniences, not new engine node kinds. Connections
-between indexes must not be inferred just because names match.
+Version one is single-project: the viewer process's indexed root scopes every
+symbol and saved board. Folders/namespaces are selection or layout conveniences,
+not new engine node kinds. Imported identities cannot select another project;
+only the current index is queried. Cross-project boards are deferred, and
+connections between indexes must never be inferred just because names match.
 
 ## All node kinds, with a small set of card families
 
@@ -92,8 +95,11 @@ presentation; preserve ambiguity instead of claiming a runtime target is known.
 - The panel offers **Outgoing / Incoming**, text search, exact-kind filters and
   grouped target rows. Show target kind, owner/project/file, relationship kinds,
   supporting member pairs and evidence counts. Counts are indexed facts, not
-  runtime execution frequency. Paging must retain scope and filters.
-- Rows distinguish **Not on board**, **Hidden**, and **On board**. Offer **Add to
+  runtime execution frequency. Paging must retain scope and filters. Following a
+  target's Connections preserves a panel-local Back path including scroll and
+  selection; compact fixed controls must leave visible room for results.
+- Rows distinguish **Not on board**, **Hidden**, **Folded in …**, and **Pinned on
+  board**. Offer **Add to
   board**, **Restore**, or **Locate** respectively, plus multi-select **Add
   selected**. The selectable object is a target symbol, not a persisted edge.
 - Add only selected symbols. Grouping method targets by class does not silently
@@ -107,6 +113,8 @@ presentation; preserve ambiguity instead of claiming a runtime target is known.
 - Restoring recovers the previous included identity, expansion and geometry;
   Restore All Hidden does not admit unrelated neighbours. Hiding leaves the
   target in Connections and a named Hidden items list and offers **Undo hide**.
+  Hidden pinned members also appear marked Hidden with Restore in their owner's
+  outline, not as ordinary rows whose edges inexplicably disappeared.
 - Locate highlights/fits the existing representative and can reveal a folded
   member without adding a duplicate. Adding/locating a symbol does not silently
   remove active relation filters; explain filtered/hidden edges.

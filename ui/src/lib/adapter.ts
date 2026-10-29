@@ -46,6 +46,9 @@ import type {
   WireTrails,
 } from './wire';
 
+import type { BoardSnapshot, BoardSearchRequest, BoardSearch, BoardConnectionRequest, BoardConnections, BoardEvidencePage,
+  BoardList, BoardLoaded, BoardSaved, BoardDocument, SaveBoardRequest } from './board-wire';
+
 /* ---------------------------------------------------------------- errors -- */
 
 /**
@@ -205,6 +208,16 @@ export interface StepsRequest {
  * are optional for exactly that reason.
  */
 export interface GraphAdapter {
+  /** Optional selected-subgraph Board capabilities; existing hosts remain compatible. */
+  board?(ids: readonly string[], signal?: AbortSignal): Promise<BoardSnapshot>;
+  boardSearch?(request: BoardSearchRequest, signal?: AbortSignal): Promise<BoardSearch>;
+  boardConnections?(request: BoardConnectionRequest, signal?: AbortSignal): Promise<BoardConnections>;
+  boardEvidence?(request: BoardConnectionRequest, signal?: AbortSignal): Promise<BoardEvidencePage>;
+  boards?(signal?: AbortSignal): Promise<BoardList>;
+  loadBoard?(id: string, signal?: AbortSignal): Promise<BoardLoaded>;
+  resolveBoard?(document: BoardDocument, signal?: AbortSignal): Promise<BoardLoaded>;
+  saveBoard?(request: SaveBoardRequest, signal?: AbortSignal): Promise<BoardSaved>;
+  deleteBoard?(id: string, signal?: AbortSignal): Promise<{ deleted: string }>;
   /** The index's own facts: counts, thresholds, the blast scale. */
   stats(signal?: AbortSignal): Promise<WireStats>;
   search(query: string, opts?: SearchRequest, signal?: AbortSignal): Promise<WireSearch>;
@@ -278,6 +291,12 @@ export interface HttpAdapterOptions {
 /** Ids and paths carry ':' and '/', so encode per segment and rejoin. */
 function encodePath(value: string): string {
   return value.split('/').map(encodeURIComponent).join('/');
+}
+
+function boardParams(request: BoardSearchRequest | BoardConnectionRequest): URLSearchParams {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(request)) if (value !== undefined) params.set(key, typeof value === 'boolean' ? (value ? '1' : '0') : String(value));
+  return params;
 }
 
 function query(params: URLSearchParams): string {
@@ -355,6 +374,15 @@ export function createHttpAdapter(options: HttpAdapterOptions = {}): GraphAdapte
   }
 
   return {
+    board: (ids, signal) => getJson<BoardSnapshot>(`api/board${query(new URLSearchParams({ ids: JSON.stringify(ids) }))}`, signal),
+    boardSearch: (request, signal) => getJson<BoardSearch>(`api/board/search${query(boardParams(request))}`, signal),
+    boardConnections: (request, signal) => getJson<BoardConnections>(`api/board/connections${query(boardParams(request))}`, signal),
+    boardEvidence: (request, signal) => getJson<BoardEvidencePage>(`api/board/evidence${query(boardParams(request))}`, signal),
+    boards: (signal) => getJson<BoardList>('api/boards', signal),
+    loadBoard: (id, signal) => getJson<BoardLoaded>(`api/boards/${encodeURIComponent(id)}`, signal),
+    resolveBoard: (document, signal) => write<BoardLoaded>('api/boards/resolve', 'POST', { document }, signal),
+    saveBoard: (request, signal) => write<BoardSaved>('api/boards', 'POST', request, signal),
+    deleteBoard: (id, signal) => write<{ deleted: string }>(`api/boards/${encodeURIComponent(id)}`, 'DELETE', undefined, signal),
     stats: (signal) => getJson<WireStats>('api/stats', signal),
 
     search(text, opts = {}, signal) {

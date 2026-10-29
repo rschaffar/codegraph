@@ -109,9 +109,11 @@ contracts. Reuse their graph APIs, source/highlight/drift handling, theme,
 navigation and renderer wherever suitable; the exception does not relax security,
 read-only semantics or truthful graph evidence. The isolated sample-data
 clickdummy at `ui/board-prototype.html` implements all-kind sample cards and
-Connections-based inclusion/restoration; live-index/API integration and persistence
-remain planned. Keep the prototype out of the reusable UI package, and do not
-describe it or the Nix packaging commit as delivering the full feature.
+Connections-based inclusion/restoration. The first live single-project Board is
+implemented at `#/board`, including bounded indexed queries and metadata-only
+saving under `.codegraph/ui/boards/`. See the plan's remaining acceptance/limits;
+never infer release readiness or cross-project support. Keep fixture code out of
+the reusable UI package; share pure models/renderers and optional adapter methods.
 
 ### NodeKind / EdgeKind
 
