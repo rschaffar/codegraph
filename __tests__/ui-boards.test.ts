@@ -1,10 +1,13 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as http from 'http';
 import { execFileSync } from 'child_process';
 import CodeGraph from '../src/index';
+import type { Node } from '../src/types';
+import { MAX_BOARD_DEPTH } from '../src/graph/board-projection';
+import { buildBoard } from '../src/ui-server/api/board';
 import { DatabaseConnection, getDatabasePath } from '../src/db';
 import { QueryBuilder } from '../src/db/queries';
 import { startUiServer, type UiServerHandle } from '../src/ui-server';
@@ -38,6 +41,7 @@ beforeAll(async () => {
   indexRoot = path.join(temp, 'indexed');
   fs.mkdirSync(path.join(indexRoot, 'src'), { recursive: true });
   fs.writeFileSync(path.join(indexRoot, 'src/a.ts'), alphaSource);
+  fs.writeFileSync(path.join(indexRoot, 'src/context.ts'), 'export const contextFixture = 1;\n');
   fs.writeFileSync(path.join(indexRoot, 'src/overloads.ts'), [
     'export function duplicate(x: string): string;',
     'export function duplicate(x: number): number;',
@@ -50,7 +54,28 @@ beforeAll(async () => {
   const duplicate = cg.getNodesByQualifiedName('duplicate')[0]!;
   const connection = DatabaseConnection.open(getDatabasePath(indexRoot));
   try {
-    new QueryBuilder(connection.getDb()).insertNode({ ...duplicate, id: 'duplicate-declaration', startLine: 2, signature: 'duplicate(x: number): number' });
+    const queries = new QueryBuilder(connection.getDb());
+    queries.insertNode({ ...duplicate, id: 'duplicate-declaration', startLine: 2, signature: 'duplicate(x: number): number' });
+    const add = (id: string, kind: Node['kind'], startColumn = 0, filePath = 'src/context.ts') => queries.insertNode({
+      ...duplicate, id, kind, name: id, qualifiedName: id, filePath, startLine: 3, endLine: 4, startColumn,
+      endColumn: startColumn + 1, signature: undefined,
+    });
+    const contains = (source: string, target: string, confidence?: number) => queries.insertEdge({ source, target, kind: 'contains',
+      ...(confidence === undefined ? {} : { metadata: { confidence } }) });
+    add('context-file', 'file'); add('context-namespace', 'namespace'); add('context-owner', 'class');
+    add('context-expanded', 'class', 4); add('context-hidden', 'method', 18); add('context-source', 'function', 7);
+    add('context-sibling', 'method', 2); add('context-neighbor', 'function');
+    add('context-test', 'method', 0, 'src/context.test.ts'); add('context-generated', 'field', 0, 'src/schema.pb.go');
+    add('context-uncertain', 'property');
+    contains('context-file', 'context-namespace'); contains('context-namespace', 'context-owner');
+    contains('context-namespace', 'context-source'); contains('context-owner', 'context-expanded', 0.4);
+    for (const target of ['context-hidden', 'context-sibling', 'context-test', 'context-generated']) contains('context-expanded', target);
+    contains('context-expanded', 'context-uncertain', 0.4);
+    queries.insertEdge({ source: 'context-hidden', target: 'context-neighbor', kind: 'calls' });
+    for (let i = 0; i < MAX_BOARD_DEPTH + 6; i++) {
+      add(`context-deep-${i}`, 'namespace');
+      if (i) contains(`context-deep-${i - 1}`, `context-deep-${i}`);
+    }
   } finally { connection.close(); }
   viewerDir = path.join(temp, 'viewer');
   fs.mkdirSync(viewerDir);
@@ -79,6 +104,20 @@ function put(id: string, contents: string) {
   fs.writeFileSync(path.join(root, BOARDS_RELATIVE_DIR, `${id}.json`), contents);
 }
 
+function contextDocument(): BoardDocument {
+  const doc = document();
+  const ids = ['context-owner', 'context-expanded', 'context-hidden', 'context-source', 'context-test'];
+  const nodes = cg.getNodesByIds(ids);
+  doc.symbols = ids.map((id) => {
+    const node = nodes.get(id)!;
+    return { key: id, identity: { id, qualifiedName: node.qualifiedName, kind: node.kind, file: node.filePath },
+      position: { x: 12, y: -9 }, included: id === 'context-owner', hidden: id === 'context-hidden' || id === 'context-test',
+      expanded: id === 'context-expanded' };
+  });
+  doc.cards[0]!.symbolKey = 'context-source';
+  return doc;
+}
+
 describe('board import validation without storage', () => {
   it('round-trips the concrete document, including future kinds and hidden layout', () => {
     const doc = document();
@@ -104,6 +143,53 @@ describe('board import validation without storage', () => {
     }
     expect(parseBoardDocument({ ...doc, filters: { kind: 'k'.repeat(128), showStructure: true } }).filters.kind).toHaveLength(128);
   });
+  it('round-trips optional visibility filters while preserving legacy V1 defaults and strict booleans', () => {
+    const legacy = document();
+    const restored = parseBoardDocument(legacy);
+    expect(restored).toEqual(legacy);
+    expect(restored.filters.includeTests ?? false).toBe(false);
+    expect(restored.filters.includeGenerated ?? false).toBe(false);
+    expect(restored.filters.includeUncertain ?? false).toBe(false);
+    for (const includeTests of [false, true]) for (const includeGenerated of [false, true]) for (const includeUncertain of [false, true]) {
+      const doc = document();
+      Object.assign(doc.filters, { includeTests, includeGenerated, includeUncertain });
+      expect(parseBoardDocument(doc)).toEqual(doc);
+      const saved = save(`Filters ${includeTests}/${includeGenerated}/${includeUncertain}`, doc);
+      expect(readStoredBoard(root, saved.id)!.document).toEqual(doc);
+      expect(resolveBoard(cg, doc).board).toEqual(doc);
+    }
+    for (const key of ['includeTests', 'includeGenerated', 'includeUncertain']) {
+      for (const value of [null, 0, 1, '0', '1', 'true', [], {}]) {
+        const doc = document();
+        (doc.filters as any)[key] = value;
+        expect(() => parseBoardDocument(doc)).toThrow(/boolean/);
+      }
+    }
+    // Discovery scopes cannot turn an imported document into project authority.
+    for (const key of ['namespace', 'libraryPath', 'projectPath', 'path']) {
+      const doc = document();
+      (doc.filters as any)[key] = 'outside';
+      expect(() => parseBoardDocument(doc)).toThrow(/Unknown board property/);
+    }
+  });
+  it('persists bounded member reveal limits and source-only nested expansion without source cards', () => {
+    const legacy = document();
+    expect(parseBoardDocument(legacy).symbols[0]!.memberLimit ?? 6).toBe(6);
+    for (const memberLimit of [1, 6, 50, 2048]) {
+      const doc = document();
+      Object.assign(doc.symbols[0]!, { included: false, hidden: false, expanded: true, memberLimit });
+      doc.cards = [];
+      expect(parseBoardDocument(doc)).toEqual(doc);
+      const saved = save(`Nested ${memberLimit}`, doc);
+      expect(readStoredBoard(root, saved.id)!.document).toEqual(doc);
+      expect(resolveBoard(cg, doc).board).toEqual(doc);
+    }
+    for (const memberLimit of [null, '6', 0, -1, 1.5, 2049, Infinity, NaN, true]) {
+      const doc = document();
+      (doc.symbols[0] as any).memberLimit = memberLimit;
+      expect(() => parseBoardDocument(doc)).toThrow();
+    }
+  });
   it('retains source-only identities without admitting graph membership', () => {
     const doc = document();
     doc.symbols[0]!.included = false;
@@ -111,8 +197,29 @@ describe('board import validation without storage', () => {
     expect(parseBoardDocument(doc)).toEqual(doc);
     const saved = save('Source only', doc);
     expect(readStoredBoard(root, saved.id)!.document).toEqual(doc);
-    doc.symbols[0]!.hidden = true;
-    expect(() => parseBoardDocument(doc)).toThrow(/source-only/);
+  });
+  it('retains hidden unpinned outline identities and restores visibility without pinning or hiding source cards', () => {
+    for (const withSourceCard of [false, true]) {
+      const doc = document();
+      Object.assign(doc.symbols[0]!, { included: false, hidden: true, expanded: true, memberLimit: 50 });
+      if (!withSourceCard) doc.cards = [];
+      expect(parseBoardDocument(doc)).toEqual(doc);
+      const name = `Hidden outline ${withSourceCard}`;
+      const saved = saveStoredBoard(indexRoot, { name, document: doc }, writable);
+      expect(readStoredBoard(indexRoot, saved.id)!.document).toEqual(doc);
+      const loaded = loadBoard(cg, indexRoot, saved.id, readOnly);
+      expect(loaded.board).toEqual(doc);
+      expect(loaded.resolutions[0]!.node).not.toBeNull();
+      expect(loaded.board.symbols[0]).toMatchObject({ included: false, hidden: true, expanded: true, memberLimit: 50 });
+      const restored = parseBoardDocument(loaded.board);
+      restored.symbols[0]!.hidden = false;
+      expect(restored.symbols[0]!.included).toBe(false);
+      expect(restored.cards).toEqual(doc.cards);
+      expect(restored.symbols[0]!.position).toEqual(doc.symbols[0]!.position);
+      saveStoredBoard(indexRoot, { id: saved.id, name, document: restored }, writable);
+      expect(loadBoard(cg, indexRoot, saved.id, readOnly).board).toEqual(restored);
+      expect(resolveBoard(cg, restored).board.symbols[0]).toMatchObject({ included: false, hidden: false, expanded: true, memberLimit: 50 });
+    }
   });
   it('rejects duplicate identity tuples across distinct keys, ignoring node-id hints and membership', () => {
     for (const signature of [undefined, 'alpha(): number']) {
@@ -409,6 +516,109 @@ describe('exact current-index identity resolution', () => {
     const saved = saveStoredBoard(indexRoot, { name: 'Converging', document: doc }, writable);
     expect(() => loadBoard(cg, indexRoot, saved.id, writable)).toThrow(/same live symbol/);
     expect(readStoredBoard(indexRoot, saved.id)!.document).toEqual(doc);
+  });
+  it('returns hidden/expanded/source-only identity ancestors without seeding membership, descendants or relationships', () => {
+    const doc = contextDocument();
+    const expected = ['context-file', 'context-namespace', ...doc.symbols.map((s) => s.identity.id!)].sort();
+    const loaded = resolveBoard(cg, doc);
+    expect(loaded.board).toEqual(doc);
+    expect(loaded.resolutions.every((resolution) => resolution.status === 'ok')).toBe(true);
+    expect(loaded.symbols!.map((s) => s.id).sort()).toEqual(expected);
+    expect(loaded.symbols!.find((s) => s.id === 'context-hidden')).toMatchObject({ ownerId: 'context-expanded', startColumn: 18 });
+    expect(loaded.symbols!.find((s) => s.id === 'context-expanded')).toMatchObject({ ownerId: 'context-owner', memberCount: 2, startColumn: 4 });
+    expect(loaded.symbols!.find((s) => s.id === 'context-test')).toMatchObject({ test: true, ownerId: 'context-expanded' });
+    expect(loaded.symbols!.find((s) => s.id === 'context-owner')!.memberCount).toBe(0); // weak contains path remains filtered
+    expect(loaded.board.symbols.filter((s) => s.included).map((s) => s.key)).toEqual(['context-owner']);
+    expect(loaded).not.toHaveProperty('included');
+    expect(loaded).not.toHaveProperty('scopeIds');
+    expect(loaded).not.toHaveProperty('relations');
+    const projection = buildBoard(cg, new URLSearchParams({ ids: JSON.stringify(['context-owner']) }));
+    expect(projection.included).toEqual(['context-owner']);
+    expect(projection.scopeIds).toEqual(['context-owner']);
+    expect(projection.symbols.some((s) => ['context-expanded', 'context-hidden', 'context-source', 'context-test'].includes(s.id))).toBe(false);
+    expect(projection.relations).toEqual([]);
+    const saved = saveStoredBoard(indexRoot, { name: 'Identity context only', document: doc }, writable);
+    const reopened = loadBoard(cg, indexRoot, saved.id, readOnly);
+    expect(reopened.readOnly).toBe(true);
+    expect(reopened.board).toEqual(doc);
+    expect(reopened.symbols).toEqual(loaded.symbols);
+    expect(readStoredBoard(indexRoot, saved.id)!.document).toEqual(doc);
+    expect(doc.symbols.filter((s) => !s.included)).toHaveLength(4);
+  });
+  it('applies document visibility filters to context member counts, not identity resolution or context membership', () => {
+    for (const enabled of [false, true]) {
+      const doc = contextDocument();
+      Object.assign(doc.filters, { includeTests: enabled, includeGenerated: enabled, includeUncertain: enabled });
+      const loaded = resolveBoard(cg, doc);
+      expect(loaded.symbols!.find((s) => s.id === 'context-expanded')!.memberCount).toBe(enabled ? 5 : 2);
+      expect(loaded.symbols!.find((s) => s.id === 'context-owner')!.memberCount).toBe(enabled ? 1 : 0);
+      expect(loaded.symbols!.map((s) => s.id).sort()).toEqual(['context-file', 'context-namespace', ...doc.symbols.map((s) => s.identity.id!)].sort());
+      expect(loaded.symbols!.some((s) => ['context-sibling', 'context-generated', 'context-uncertain', 'context-neighbor'].includes(s.id))).toBe(false);
+      expect(loaded.resolutions.every((resolution) => resolution.status === 'ok')).toBe(true);
+      expect(loaded.board).toEqual(doc);
+    }
+  });
+  it('omits failed resolutions from identity context and reports ancestor bounds without projecting anything', () => {
+    const doc = document();
+    doc.cards = [];
+    doc.symbols[0] = { ...doc.symbols[0]!, included: false, hidden: false,
+      identity: { id: `context-deep-${MAX_BOARD_DEPTH + 5}`, qualifiedName: `context-deep-${MAX_BOARD_DEPTH + 5}`, kind: 'namespace', file: 'src/context.ts' } };
+    doc.symbols.push({ ...doc.symbols[0]!, key: 'missing', identity: { qualifiedName: 'noLongerHere', kind: 'method', file: 'src/context.ts' } });
+    doc.symbols.push({ ...doc.symbols[0]!, key: 'ambiguous', identity: { qualifiedName: 'duplicate', kind: 'function', file: 'src/overloads.ts' } });
+    const loaded = resolveBoard(cg, doc);
+    expect(loaded.resolutions.map((resolution) => resolution.status)).toEqual(['ok', 'missing', 'ambiguous']);
+    expect(loaded.symbols).toHaveLength(MAX_BOARD_DEPTH + 1);
+    expect(loaded.symbols!.every((s) => s.id.startsWith('context-deep-'))).toBe(true);
+    expect(loaded.notes!.join(' ')).toMatch(/Ancestor identity context bounded/);
+    expect(loaded.board).toEqual(doc);
+    expect(loaded).not.toHaveProperty('relations');
+  });
+  it('resolves exact identities and their facts in one read snapshot despite concurrent index changes', () => {
+    const projectRoot = fs.mkdtempSync(path.join(temp, 'resolution-snapshot-'));
+    const snapshotCg = CodeGraph.initSync(projectRoot);
+    let writer: DatabaseConnection | undefined;
+    let lookup: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      const owner: Node = { id: 'owner', kind: 'class', name: 'owner', qualifiedName: 'owner', filePath: 'live.ts', language: 'typescript',
+        startLine: 1, endLine: 10, startColumn: 8, endColumn: 12 };
+      const child: Node = { ...owner, id: 'child', kind: 'method', name: 'child', qualifiedName: 'child', startLine: 3, startColumn: 4 };
+      snapshotCg['queries'].insertNode(owner);
+      snapshotCg['queries'].insertNode(child);
+      snapshotCg['queries'].insertEdge({ source: owner.id, target: child.id, kind: 'contains' });
+      snapshotCg['db'].getDb().prepare(`INSERT INTO files(path,content_hash,language,size,modified_at,indexed_at) VALUES ('live.ts','x','typescript',0,0,0)`).run();
+      const doc = document();
+      doc.cards = [];
+      doc.symbols = [child, owner].map((node) => ({ key: node.id,
+        identity: { id: node.id, qualifiedName: node.qualifiedName, kind: node.kind, file: node.filePath },
+        position: { x: 0, y: 0 }, included: node.id === owner.id, hidden: node.id === child.id, expanded: true }));
+      writer = DatabaseConnection.open(getDatabasePath(projectRoot));
+      const original = snapshotCg.getNodesByQualifiedName.bind(snapshotCg);
+      let committed = false;
+      lookup = vi.spyOn(snapshotCg, 'getNodesByQualifiedName').mockImplementation((name) => {
+        const nodes = original(name); // establishes this request's SQLite snapshot
+        if (!committed) {
+          writer!.getDb().transaction(() => {
+            writer!.getDb().prepare("UPDATE nodes SET qualified_name='renamed-owner', start_column=48 WHERE id='owner'").run();
+            writer!.getDb().prepare("UPDATE nodes SET start_column=99 WHERE id='child'").run();
+            writer!.getDb().prepare("UPDATE files SET generated=1 WHERE path='live.ts'").run();
+            new QueryBuilder(writer!.getDb()).insertNode({ ...child, id: 'duplicate-child' });
+          })();
+          committed = true;
+        }
+        return nodes;
+      });
+      const loaded = resolveBoard(snapshotCg, doc);
+      expect(loaded.resolutions.map((resolution) => resolution.status)).toEqual(['ok', 'ok']);
+      expect(loaded.symbols!.find((s) => s.id === child.id)).toMatchObject({ ownerId: owner.id, startColumn: 4 });
+      expect(loaded.symbols!.find((s) => s.id === owner.id)).toMatchObject({ qualifiedName: 'owner', startColumn: 8, memberCount: 1 });
+      expect(loaded.symbols!.some((s) => s.generated)).toBe(false);
+      expect(loaded.board).toEqual(doc);
+      const refreshed = resolveBoard(snapshotCg, doc);
+      expect(refreshed.resolutions.map((resolution) => resolution.status)).toEqual(['ambiguous', 'missing']);
+      expect(refreshed.symbols).toEqual([]);
+    } finally {
+      lookup?.mockRestore(); writer?.close(); snapshotCg.close(); fs.rmSync(projectRoot, { recursive: true, force: true });
+    }
   });
   it('retains distinct missing and ambiguous identity placeholders', () => {
     const doc = document();

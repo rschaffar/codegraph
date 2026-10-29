@@ -29,10 +29,13 @@ export interface BoardDocument {
     key: string;
     identity: BoardIdentity;
     position: BoardPosition;
-    /** False for identities retained only by source cards, not graph membership. */
+    /** False for source-card/outline-only identities, not graph membership. */
     included: boolean;
+    /** Graph/outline visibility, independent of pinning and source-card visibility. */
     hidden: boolean;
     expanded: boolean;
+    /** Direct-outline reveal count; absent in legacy V1 documents (default 6). */
+    memberLimit?: number;
   }>;
   cards: Array<{
     key: string;
@@ -44,7 +47,14 @@ export interface BoardDocument {
     zIndex: number;
   }>;
   viewport: BoardPosition & { zoom: number };
-  filters: { kind: string; showStructure: boolean };
+  filters: {
+    kind: string;
+    showStructure: boolean;
+    /** Absent in legacy V1 documents; each defaults to false. */
+    includeTests?: boolean;
+    includeGenerated?: boolean;
+    includeUncertain?: boolean;
+  };
 }
 export interface BoardSummary { id: string; name: string; updatedAt: string }
 export interface StoredBoard extends BoardSummary {
@@ -125,20 +135,22 @@ export function parseBoardDocument(raw: unknown): BoardDocument {
   const symbolKeys = new Set<string>();
   const symbolIdentities = new Set<string>();
   const symbols = v.symbols.map((rawSymbol) => {
-    const s = object(rawSymbol, ['key', 'identity', 'position', 'included', 'hidden', 'expanded']);
+    const s = object(rawSymbol, ['key', 'identity', 'position', 'included', 'hidden', 'expanded', 'memberLimit']);
     const key = localKey(s.key);
     if (symbolKeys.has(key)) throw badRequest('Duplicate board symbol key.');
     symbolKeys.add(key);
     const included = boolean(s.included);
     const hidden = boolean(s.hidden);
-    if (!included && hidden) throw badRequest('A source-only symbol cannot be hidden; hidden applies only to included graph symbols.');
     const parsedIdentity = identity(s.identity);
     // JSON tuple encoding avoids delimiter collisions; the optional node id
     // is only a hint and must never distinguish two durable identities.
     const tuple = JSON.stringify([parsedIdentity.qualifiedName, parsedIdentity.kind, parsedIdentity.file, parsedIdentity.signature ?? null]);
     if (symbolIdentities.has(tuple)) throw badRequest('Duplicate board symbol identity.');
     symbolIdentities.add(tuple);
-    return { key, identity: parsedIdentity, position: position(s.position), included, hidden, expanded: boolean(s.expanded) };
+    const memberLimit = s.memberLimit === undefined ? undefined : number(s.memberLimit, 1, 2048);
+    if (memberLimit !== undefined && !Number.isInteger(memberLimit)) throw badRequest('Board memberLimit must be an integer.');
+    return { key, identity: parsedIdentity, position: position(s.position), included, hidden, expanded: boolean(s.expanded),
+      ...(memberLimit === undefined ? {} : { memberLimit }) };
   });
   const cardKeys = new Set<string>();
   const cardSymbols = new Set<string>();
@@ -156,11 +168,14 @@ export function parseBoardDocument(raw: unknown): BoardDocument {
     return { key, symbolKey, position: position(c.position), width: number(c.width, 100, 4096), height: number(c.height, 60, 4096), collapsed: boolean(c.collapsed), zIndex };
   });
   const viewport = object(v.viewport, ['x', 'y', 'zoom']);
-  const filters = object(v.filters, ['kind', 'showStructure']);
+  const filters = object(v.filters, ['kind', 'showStructure', 'includeTests', 'includeGenerated', 'includeUncertain']);
   const document: BoardDocument = {
     version: 1, symbols, cards,
     viewport: { x: number(viewport.x, -MAX_COORDINATE, MAX_COORDINATE), y: number(viewport.y, -MAX_COORDINATE, MAX_COORDINATE), zoom: number(viewport.zoom, 0.05, 8) },
-    filters: { kind: filters.kind === '' ? '' : text(filters.kind, 128, 'filter kind'), showStructure: boolean(filters.showStructure) },
+    filters: { kind: filters.kind === '' ? '' : text(filters.kind, 128, 'filter kind'), showStructure: boolean(filters.showStructure),
+      ...(filters.includeTests === undefined ? {} : { includeTests: boolean(filters.includeTests) }),
+      ...(filters.includeGenerated === undefined ? {} : { includeGenerated: boolean(filters.includeGenerated) }),
+      ...(filters.includeUncertain === undefined ? {} : { includeUncertain: boolean(filters.includeUncertain) }) },
   };
   if (Buffer.byteLength(JSON.stringify(document)) > MAX_BOARD_FILE_BYTES - 4096) throw badRequest('Board document is too large.');
   return document;

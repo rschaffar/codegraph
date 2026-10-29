@@ -7,6 +7,8 @@ import { PathRefusalError } from '../security';
 import { sendJson } from '../static';
 import { ApiError, badRequest, fail, notFound, ok } from './respond';
 import { toNodeRef, type WireNodeRef } from './wire';
+import { BoardGraph } from '../../graph/board-projection';
+import { toBoardSymbol, type BoardSymbol } from './board';
 import {
   assertBoardsWritable, BoardConflictError, BOARDS_RELATIVE_DIR, MAX_BOARD_FILE_BYTES,
   deleteStoredBoard, listStoredBoards, parseBoardDocument, readStoredBoard, saveStoredBoard,
@@ -32,6 +34,9 @@ export interface WireBoards {
 export interface BoardLoaded {
   board: BoardDocument;
   resolutions: BoardResolution[];
+  /** Resolved identities plus bounded proven ancestors, never canvas membership or edges. */
+  symbols?: BoardSymbol[];
+  notes?: string[];
   readOnly?: boolean;
 }
 export interface WireBoard extends BoardLoaded {
@@ -60,14 +65,22 @@ function resolveIdentities(cg: CodeGraph, document: BoardDocument): BoardResolut
 /** In-memory imports and live-index refresh: validate first, never touch storage. */
 export function resolveBoard(cg: CodeGraph, document: unknown): BoardLoaded {
   const board = parseBoardDocument(document);
-  const resolutions = resolveIdentities(cg, board);
-  const resolvedIds = new Set<string>();
-  for (const resolution of resolutions) {
-    if (!resolution.node) continue;
-    if (resolvedIds.has(resolution.node.id)) throw badRequest('Distinct board keys resolve to the same live symbol.');
-    resolvedIds.add(resolution.node.id);
-  }
-  return { board, resolutions };
+  const graph = new BoardGraph(cg);
+  return graph.snapshot(() => {
+    const resolutions = resolveIdentities(cg, board);
+    const resolvedIds = new Set<string>();
+    for (const resolution of resolutions) {
+      if (!resolution.node) continue;
+      if (resolvedIds.has(resolution.node.id)) throw badRequest('Distinct board keys resolve to the same live symbol.');
+      resolvedIds.add(resolution.node.id);
+    }
+    const notes: string[] = [];
+    // Every resolved identity needs owner context, regardless of saved inclusion,
+    // hiding or expansion. facts() does not enumerate descendants or emit edges;
+    // using these identities as projection seeds would bypass filtered paths.
+    const context = graph.facts([...resolvedIds], notes, board.filters);
+    return { board, resolutions, symbols: [...context.facts.values()].map(toBoardSymbol), notes };
+  });
 }
 export function buildBoards(projectRoot: string, options: BoardsOptions): WireBoards {
   const list = listStoredBoards(projectRoot);
