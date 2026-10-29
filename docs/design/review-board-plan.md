@@ -1,9 +1,10 @@
 # Local Review Board: design and implementation plan
 
-Status: the reviewed clickdummy fixes and first single-project live Board slice
-are implemented. The viewer has a Board route with indexed selection/Connections,
-source cards, saved metadata and exact identity restoration. Remaining acceptance
-and limitations are recorded below; this is not a claim of full release readiness.
+Status: the agreed **single-project Review Board V1 is implemented**. Selection,
+filters, recursive members, linked source cards, reader shortcuts and metadata
+persistence are integrated, with API/model/component, browser, real-review and
+source-built Nix validation. Platform and size qualifications are recorded below;
+this remains a local experimental feature, not a cross-platform release claim.
 
 This is a deliberate local extension of `codegraph ui`, not a replacement for
 Map, Symbol, Flow, Screens or Steps. The source-built Nix package carries the
@@ -129,9 +130,9 @@ Evidence counts are indexed relationships/sites, never runtime execution frequen
   or Connections recovers prior placement/expansion; a background query must not
   restore something the reviewer deliberately hid. A hidden independently pinned
   member is also marked Hidden in its owner's outline, with Restore and without
-  ordinary edge handles. Locate highlights the containing member row and explains
-  the ownership breadcrumb for deeper symbols rather than claiming they are
-  directly visible.
+  ordinary edge handles. Locate opens the proven ownership path and highlights
+  the exact nested member, without materializing every preceding sibling. The
+  breadcrumb names that path; ambiguous ownership is not guessed.
 - Clicking an aggregate edge opens supporting original relationships, endpoint
   member identities, source locations when present and provenance. Source can
   open in a card or the existing Symbol/File view, with a route back to the board.
@@ -237,41 +238,81 @@ mode. Export/import does not authorize arbitrary paths, source writes, indexing
 or Git operations. Exported identities and paths may still be private project
 information; exporting is explicit, not network publication.
 
-## Current live slice and remaining acceptance
+## Implemented V1, validation and limits
 
-Implemented: all-kind search with name/kind/relative file-prefix filters; explicit
-selection; all-kind incoming/outgoing Connections and per-target evidence paging;
-contains-based folding and pinning; typed/provenance-labelled edges; stable
-placement, Tidy/Fit; multiple lazy highlighted source cards with drift/identity
-checks; panel-local Back and hidden-member Restore; project-local Save/Save as,
-Open/Delete, JSON import/export and exact re-resolution with placeholders.
-The board remains mounted across reader-tab navigation so unsaved work is retained.
-Saving retains only identities, membership, geometry, UI filters and viewport.
+All agreed single-project functionality is integrated:
 
-The HTTP adapter exposes optional Board capabilities, keeping existing UI hosts
-compatible. Metadata writes retain Host/Origin/marker checks; `--read-only`
-refuses Save/Delete but permits loading and in-memory import/resolution. Imported
-identities cannot switch the served project. Unknown properties, versions,
-non-finite geometry, repeated identities/cards, path-shaped IDs and oversized
-requests are rejected. Interrupted metadata writes can leave a `.write.lock`;
-while held, mutations fail closed rather than guessing whether another writer
-is active. An operator must inspect/remove an abandoned lock after confirming
-no board writer remains.
+- Search all kinds by name/kind/relative path; preview indexed folder and exact
+  namespace scopes with totals/by-kind counts, then choose individual or bounded
+  batch additions. Symbol, file-outline and whole-file readers offer Add to board.
+- Default-off test/generated/uncertain controls apply to discovery, member pages
+  and relationships, with exact, disjoint exclusion reasons. Explicit cards stay
+  present; filtering never silently changes membership or claims runtime counts.
+- Connections pages preserve submitted criteria independently of unsubmitted
+  text; Back restores scope, direction, filters, selection and scroll. Target
+  windows and ten-entry history keep discovery bounded. Newly observed kinds
+  remain filterable, including when an exact-kind page is empty.
+- Recursive, source-ordered member outlines support exact-path Locate, paging,
+  independent pinning and persistent inline hide/restore. A hidden unpinned member
+  is not promoted to a graph card when restored. Visible ports attach to the
+  deepest proven row; ambiguous/cyclic ownership remains an explicit boundary.
+- Independent source cards follow indexed references into other cards, show
+  paged raw evidence, highlight related original endpoints and preserve drift
+  safety. Current-file reading drops indexed markings. Source and link requests
+  are lazy; geometry/selection-only updates do not refetch them. Native size
+  controls and keyboard resizing coexist with move/collapse/close and Fit actions.
+- Save/Save as/Open/Delete and JSON import/export retain recipes only. Exact
+  re-resolution supports shifted lines, missing/ambiguous placeholders and
+  source-only identities. Unsaved Board state survives reader-tab navigation.
 
-Current limits: 128 retained identities (including source-only cards), 32 source
-cards, 2,048 symbols per contains scope, 64 containment levels and 5,000 projection
-evidence items. Connections/search/evidence are paged, report totals and announce
-scope/evidence caps. Broad exact substring-search totals may scan the nodes table.
-Large loaded outlines are bounded; Connections filtered to `contains` can page
-and pin members beyond the projection scope. Opening source or a connection never
-admits neighbours.
+The reusable UI exports the Board, its pure model and wire types. All Board
+adapter methods and the navigation driver's Board address are optional for older
+hosts; missing operations are explained/disabled. Metadata writes retain
+Host/Origin/marker checks. Read-only mode permits loading and in-memory resolution
+but refuses Save/Delete. Imported identities cannot switch project authority.
+Strict validation and no-follow/atomic storage remain in force; interrupted
+writes can leave `.write.lock`, which requires operator inspection before removal.
 
-Remaining planned acceptance: sustained private real-review use; modest/hub-heavy
-interaction measurements; dedicated test/generated/uncertainty filter presets;
-deeper recursively rendered outlines (Locate currently highlights the containing
-row and explains its ownership breadcrumb); and Symbol/File-view Add-to-board
-shortcuts. The current implementation does not claim Windows/ARM64 runtime
-validation or arbitrary-size graph rendering. Cross-project boards remain deferred.
+Identity facts and eligible membership are separate: projection `scopeIds` and
+paged member IDs describe eligibility; `symbols` may carry extra ancestor context.
+Restoration projects **only included identities**, so expanded/hidden/source-only
+context cannot seed otherwise-filtered branches. Eligible counts never expand
+merely because old discovery facts remain cached. Retained/requested outline rows
+outside the current filter/page are labelled separately from eligible totals.
+
+Bounds remain explicit: 128 retained identities (including expanded/hidden and
+source-only identities), 32 source cards, 2,048 symbols per projection contains
+scope, 64 containment levels, 2,048 ancestor identities and 5,000 projection
+relationships. Each outline reveal is capped at 2,048 eligible rows; Connections
+can inspect/pin the remainder without making a recipe unsaveable. Discovery-only
+facts have a 16K cache target, with current/retained/displayed facts protected.
+Search, groups, targets, members, source and evidence requests are paged/bounded;
+exact broad search/group counts can still scan indexed data. An expanded outline
+can exceed the current viewport: pan or explicitly Fit, without moving cards.
+This is not arbitrary-size whole-repository rendering.
+
+Validation is reproducible through the full `npm test` suite, Svelte/TypeScript
+checks, reusable-library pruning, `nix build .#codegraph` install checks and
+`scripts/check-board-browser.mjs`. On headless NixOS use
+`nix develop -c env TERM=xterm-256color npm test`; the shell includes archive-test
+tools, and launcher fixtures admit `dirname` without admitting host Node.
+The browser script uses throwaway TypeScript/C#/Python code, writable/read-only
+viewers, a 700-member hub, keyboard/focus and source-scroll checks, and repeated
+projection/Connections timing samples. Set `CODEGRAPH_BOARD_EXECUTABLE` to an
+installed Nix executable to test its immutable viewer assets instead of `dist`.
+
+A separate read-only private C# review exercised more than 25 actions across
+folders, nested members, two source cards, Add/Pin, Restore and Back. Logical
+node/edge/file hashes and existing UI metadata were unchanged. Its 24 measured
+requests had projection p95 below 15 ms and Connections p95 below 50 ms. Private
+artifacts remain outside this repository. That session spanned UI rebuilds and
+its native wheel check was inconclusive; the isolated generic browser check
+covers scrolling and the immutable-package workflow separately.
+
+Runtime validation is **x86_64 Linux / managed Chromium**. Windows/ARM64 runtime
+and native screen-reader sessions have not been exercised; automated accessible
+labels/keyboard/focus and Svelte diagnostics are not substitutes for those claims.
+Cross-project boards and the deliberately deferred items below remain out of V1.
 
 ## Implementation sequence
 
@@ -309,7 +350,7 @@ use separate labelled lanes and ownership arrows are opt-in. Catalogue/model tes
 cover all kinds; browser checks accompany model tests for interactions. This remains
 a synthetic clickdummy, not proof of live-index/API completeness.
 
-### 1. Read-only symbol projection and evidence
+### 1. Read-only symbol projection and evidence (implemented)
 
 Add a shared derivation under `src/graph/` (proposed `board-projection.ts`) with
 bounded inputs and batched node/edge access. Define explicit membership, optional
@@ -327,7 +368,7 @@ kinds between a pair, hidden tests/generated code and paged hubs. Test incoming
 and outgoing discovery of hidden/unselected targets, member scope and exact
 filtering. Every displayed relationship must trace back to indexed evidence.
 
-### 2. Basic board as a new viewer route
+### 2. Basic board as a new viewer route (implemented)
 
 Add `ui/src/views/ReviewBoardView.svelte`, a board model/state store and shared
 symbol-card families under `ui/src/components/board/`. Reuse `@xyflow/svelte`,
@@ -340,7 +381,7 @@ typed directional aggregate edges, pan/zoom, automatic initial placement, free
 dragging and explicit Tidy/Fit. Validate on a real review before expanding the
 feature; do not call a class-only implementation complete.
 
-### 3. Incremental Connections and member detail
+### 3. Incremental Connections and member detail (implemented)
 
 Add all-kind incoming/outgoing connection browsing, individual/batch target
 inclusion, Restore/Locate, Undo hide, named hidden items, member expansion/collapse
@@ -350,7 +391,7 @@ Reuse existing traversal/cycle/identity helpers where contracts fit; do not forc
 the directory-specific Map layout to serve a different ownership model. Add
 keyboard-accessible controls and sensible focus restoration.
 
-### 4. Multiple source cards
+### 4. Multiple source cards (implemented)
 
 Compose reusable source/highlight/drift facilities into canvas source cards.
 Support move/resize/collapse/close, evidence/source navigation and readable fit.
@@ -359,7 +400,7 @@ registration/metadata and source links, not a fabricated method implementation.
 Ensure code selection/scrolling and canvas dragging do not fight. Keep source
 requests bounded and lazy, and verify multiple open cards under pan/zoom.
 
-### 5. Named project-local boards
+### 5. Named project-local boards (implemented)
 
 Add versioned board store/API and Save/Save as/Open/Delete/export/import. Extend
 the adapter with optional persistence capabilities. Share low-level persistence
@@ -367,7 +408,7 @@ safeguards with trails where useful without coupling their different data models
 Cover read-only behaviour, malformed imports, path/symlink refusals, atomic saves,
 name collisions, missing/renamed symbols and re-indexing with shifted line numbers.
 
-### 6. Acceptance, documentation and local distribution
+### 6. Acceptance, documentation and local distribution (Linux validation)
 
 Run targeted graph/API/model/component tests and the existing Map/Symbol/Flow,
 source/drift, security, navigation and reusable-UI contract regressions. Build

@@ -69,7 +69,10 @@ CODEGRAPH_UI=1 ./result/bin/codegraph ui /absolute/path/to/project --read-only
 ```
 
 The **Board** tab (`#/board`) reads the served project's real index. Use Add
-symbols, then Connections to include only chosen targets. In normal mode, named
+symbols or preview folders/namespaces, then Connections to include only chosen
+targets. Tests, generated code and uncertain edges are initially excluded, with
+explicit controls and counts; selected cards remain. Expand nested members or
+follow an indexed source link into another independent source card. In normal mode, named
 boards save metadata under `.codegraph/ui/boards/`; `--read-only` allows exploring
 and loading, but refuses saving/deleting. Neither mode edits source, the index
 or Git state. Run without `--read-only` when you want to save boards.
@@ -78,9 +81,27 @@ The review-board clickdummy remains available at `/board-prototype.html` on
 that viewer's URL. It is an isolated, session-only synthetic example, not a view
 of the indexed project. See [its design plan and development instructions](docs/design/review-board-plan.md#0-interaction-clickdummy-implemented-review-before-live-integration).
 
-`nix develop` provides Node.js and the native build toolchain for development.
-For installed-package changes, rebuild with `nix build`; `npm run build` in a dev
-shell alone does not rebuild the native kernel.
+`nix develop` provides Node.js, the native build toolchain and the archive tools
+used by the full test suite. For installed-package changes, rebuild with
+`nix build`; `npm run build` in a dev shell alone does not rebuild the native kernel.
+On a headless shell with `TERM=dumb`, run the terminal-glyph assertions with an
+explicit Unicode-capable test terminal:
+
+```bash
+nix develop -c env TERM=xterm-256color npm test
+npm run check --workspace ui
+npm run build:lib
+# Requires an existing managed browser and agent-browser; installs neither:
+CODEGRAPH_BROWSER_EXECUTABLE=/absolute/path/to/chromium node scripts/check-board-browser.mjs
+# To exercise the installed immutable Nix viewer instead of local dist:
+CODEGRAPH_BOARD_EXECUTABLE="$PWD/result/bin/codegraph" \
+  CODEGRAPH_BROWSER_EXECUTABLE=/absolute/path/to/chromium node scripts/check-board-browser.mjs
+```
+
+The browser check creates its own generic indexed fixture and writable/read-only
+viewers, leaves diagnostics under the printed temporary directory and closes only
+its own processes. It never uses a private review checkout or saves into this
+repository's index.
 
 `flake.lock`, `package-lock.json` and `codegraph-kernel/Cargo.lock` pin the build
 inputs. After changing npm dependencies, update `npmDepsHash` in
@@ -90,8 +111,11 @@ from `Cargo.lock` without a separately maintained Cargo hash.
 
 The package's install checks require successful native loading and extraction,
 exercise CLI indexing/querying with native and WASM extraction, and start the
-read-only viewer to verify its HTML, JavaScript and indexed search API. These
-are packaging smoke tests, not the full test suite or browser interaction tests.
+read-only viewer to verify its HTML, JavaScript, indexed search and Board reads,
+in-memory identity resolution and metadata-write refusal. A second writable
+viewer saves, reopens and deletes a board in the throwaway fixture, checking that
+source and graph counts remain unchanged. These are packaging smoke tests, not
+the full test suite or browser interaction tests.
 Linux ARM64 is exposed for native builds on that platform; exposing an output
 is not evidence that it has been built on every architecture.
 

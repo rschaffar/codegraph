@@ -48,7 +48,8 @@ package is **prepared, not published** — `ui/package.json` carries `"private":
 and `scripts/pack-npm.sh` only packs a tarball when `CODEGRAPH_PACK_UI=1`.
 
 Tests run as **two Vitest projects** (`test.projects` in `vitest.config.mts`): `engine` (node) and `ui` (jsdom, the
-Svelte plugin, `resolve.conditions: ['browser']`) for the single `__tests__/ui-package.test.ts`.
+Svelte plugin, `resolve.conditions: ['browser']`) for `__tests__/ui-package.test.ts` and
+`__tests__/ui-board-shortcuts.test.ts`.
 `npm test` still runs both. The split is not cosmetic — `browser` is a package-resolution
 condition, and applied globally it hands the engine's suites the browser builds of
 `web-tree-sitter` and friends. The root config (`vitest.config.mts`, `.mts` because the plugin is
@@ -109,11 +110,15 @@ contracts. Reuse their graph APIs, source/highlight/drift handling, theme,
 navigation and renderer wherever suitable; the exception does not relax security,
 read-only semantics or truthful graph evidence. The isolated sample-data
 clickdummy at `ui/board-prototype.html` implements all-kind sample cards and
-Connections-based inclusion/restoration. The first live single-project Board is
-implemented at `#/board`, including bounded indexed queries and metadata-only
-saving under `.codegraph/ui/boards/`. See the plan's remaining acceptance/limits;
-never infer release readiness or cross-project support. Keep fixture code out of
-the reusable UI package; share pure models/renderers and optional adapter methods.
+Connections-based inclusion/restoration. The single-project V1 Board is
+implemented at `#/board`, including filtered indexed selection, nested member
+Locate, linked source cards and metadata-only saving under `.codegraph/ui/boards/`.
+Cached identity/ancestor facts are not eligible membership: preserve `scopeIds`
+and direct member-page IDs separately, and project only explicitly included seeds
+when restoring a board. Hidden inline members restore without becoming pins.
+See the plan's acceptance evidence and platform/size limits; never infer release
+readiness or cross-project support. Keep fixture code out of the reusable UI
+package; share pure models/renderers and optional adapter methods.
 
 ### NodeKind / EdgeKind
 

@@ -1,10 +1,10 @@
 # Review Board: graph model and complete kind coverage
 
-Status: both the sample-data clickdummy and first single-project live Board
+Status: the sample-data clickdummy and implemented single-project V1 Board
 support this kind inventory and explicit Connections workflow. Companion to
-[the Review Board plan](review-board-plan.md), which records the implemented slice,
-bounds and remaining acceptance. All-kind presentation does not guarantee that
-all language extractors discover every real relationship.
+[the Review Board plan](review-board-plan.md), which records validation evidence
+and platform/size limits. All-kind presentation does not guarantee that every
+language extractor discovers every real relationship.
 
 ## Engine model versus board presentation
 
@@ -110,14 +110,47 @@ presentation; preserve ambiguity instead of claiming a runtime target is known.
 - Browse/read/preview operations never change board membership. An optional
   context preview must be explicitly enabled, visually distinct, bounded and
   non-recursive; it must not turn an Add/Restore action into neighbour admission.
-- Restoring recovers the previous included identity, expansion and geometry;
-  Restore All Hidden does not admit unrelated neighbours. Hiding leaves the
+- Restoring recovers previous visibility, expansion and geometry without changing
+  inclusion: a hidden inline member remains unpinned, while an independently
+  pinned member returns to its card. Restore All Hidden admits no neighbours. Hiding leaves the
   target in Connections and a named Hidden items list and offers **Undo hide**.
   Hidden pinned members also appear marked Hidden with Restore in their owner's
   outline, not as ordinary rows whose edges inexplicably disappeared.
 - Locate highlights/fits the existing representative and can reveal a folded
   member without adding a duplicate. Adding/locating a symbol does not silently
   remove active relation filters; explain filtered/hidden edges.
+
+## Eligibility, cached facts and restoration
+
+The selection projection distinguishes `included` (explicit graph identities),
+`scopeIds` (eligible contains scope) and `symbols` (identity/ancestor facts, which
+can be broader). Direct member pages similarly separate eligible `items` IDs
+and exact totals from their `symbols` context. Never infer membership from the
+presence of a fact in a discovery cache. Filtered snapshots must not resurrect
+cached test/generated/uncertain descendants or inflate eligible member totals.
+
+Tests/non-production and generated code use the engine's existing indexed-path
+classifiers and generated-file records. Uncertain means confidence below 0.6 or
+name-only resolution; synthesis alone does not make evidence uncertain. Filters
+start excluded and expose exact disjoint counts, classified as tests, then
+generated, then uncertain. Explicit graph cards survive exclusions; their
+relationships still obey active filters. Retained hidden/pinned/requested rows
+outside a filtered page are displayed and counted separately, with no edge
+handles on hidden rows.
+
+Saved `included: false` identities may own a source card, expansion or hidden
+inline preference. Loading resolves all identities and their bounded proven
+ancestry, but queries projection edges only from included seeds. It must not
+re-seed an excluded branch merely because a child was expanded before saving.
+Member reveal limits are persisted and capped consistently at 2,048; paged
+Connections remains available beyond that outline bound. Preserve start columns
+as well as lines for same-line declaration ordering.
+
+Source-card selection is presentation decoration, derived from original endpoint
+IDs and their proven representatives. It does not select additional indexed nodes
+or turn an incoming/outgoing reference into execution-frequency information.
+Geometry/selection changes must not restart source verification or graph queries;
+identity/index, requested line/page, collapse and visibility changes may do so.
 
 ## What complete support does and does not promise
 
