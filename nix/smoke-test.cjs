@@ -136,6 +136,57 @@ async function main() {
       clearTimeout(killTimer);
     }
   }
+
+  const writePort = await unusedPort();
+  const writeBase = `http://127.0.0.1:${writePort}`;
+  const writable = spawn(executable, ['ui', nativeFixture, '--no-open', '--port', String(writePort)], {
+    cwd: nativeFixture, env: { ...process.env, CODEGRAPH_UI: '1' }, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let writeLogs = '';
+  writable.stdout.on('data', (chunk) => { writeLogs += chunk; });
+  writable.stderr.on('data', (chunk) => { writeLogs += chunk; });
+  const writeExited = once(writable, 'exit');
+  try {
+    let ready = false;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      assert.equal(writable.exitCode, null, `writable viewer exited: ${writeLogs}`);
+      try { if ((await fetch(`${writeBase}/api/stats`, { signal: AbortSignal.timeout(500) })).ok) { ready = true; break; } } catch {}
+      await delay(100);
+    }
+    assert.ok(ready, `writable viewer not ready: ${writeLogs}`);
+    const before = await (await fetch(`${writeBase}/api/stats`)).json();
+    const search = await (await fetch(`${writeBase}/api/board/search?q=hello&kind=function`)).json();
+    const hello = search.items.find((item) => item.name === 'hello');
+    assert.ok(hello);
+    const document = {
+      version: 1,
+      symbols: [{ key: 's0', identity: { id: hello.id, qualifiedName: hello.qualifiedName, kind: hello.kind, file: hello.file }, position: { x: 12, y: 34 }, included: true, hidden: false, expanded: true }],
+      cards: [{ key: 'c0', symbolKey: 's0', position: { x: 30, y: 700 }, width: 530, height: 310, collapsed: false, zIndex: 11 }],
+      viewport: { x: -10, y: 20, zoom: .9 }, filters: { kind: '', showStructure: false },
+    };
+    const savedResponse = await fetch(`${writeBase}/api/boards`, { method: 'POST', headers: { 'content-type': 'application/json', 'X-CodeGraph-UI': '1' }, body: JSON.stringify({ name: 'Installed board acceptance', document }) });
+    assert.equal(savedResponse.status, 200);
+    const saved = await savedResponse.json();
+    const loaded = await (await fetch(`${writeBase}/api/boards/${saved.id}`)).json();
+    assert.deepEqual(loaded.board, document);
+    assert.equal(loaded.resolutions[0].node.id, hello.id);
+    const stored = JSON.parse(fs.readFileSync(path.join(nativeFixture, '.codegraph/ui/boards', `${saved.id}.json`), 'utf8'));
+    assert.equal(stored.document.symbols.length, 1);
+    assert.equal('relations' in stored.document, false);
+    assert.equal(JSON.stringify(stored).includes('return name'), false);
+    const deleted = await fetch(`${writeBase}/api/boards/${saved.id}`, { method: 'DELETE', headers: { 'X-CodeGraph-UI': '1' } });
+    assert.equal(deleted.status, 200);
+    assert.equal(fs.existsSync(path.join(nativeFixture, '.codegraph/ui/boards', `${saved.id}.json`)), false);
+    assert.equal(fs.readFileSync(path.join(nativeFixture, 'hello.ts'), 'utf8'), source);
+    const after = await (await fetch(`${writeBase}/api/stats`)).json();
+    assert.equal(after.graph.nodes, before.graph.nodes);
+    assert.equal(after.graph.edges, before.graph.edges);
+    console.log('live board: writable installed Save/Open/Delete persists metadata only; source and graph counts unchanged');
+  } finally {
+    writable.kill('SIGTERM');
+    const killTimer = setTimeout(() => writable.kill('SIGKILL'), 5_000);
+    try { await writeExited; } finally { clearTimeout(killTimer); }
+  }
 }
 
 main().then(() => process.exit(0), (error) => {

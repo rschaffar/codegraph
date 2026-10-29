@@ -35,6 +35,14 @@ function stage(osfam = windows ? 'win32' : process.platform) {
   const bundle = path.join(root, `codegraph-${osfam}-x64`);
   fs.mkdirSync(path.join(bundle, 'bin'), { recursive: true });
   fs.mkdirSync(path.join(bundle, 'lib/dist/bin'), { recursive: true });
+  if (!windows) {
+    // NixOS has no /usr/bin/dirname. Admit only this required POSIX utility,
+    // not its whole host bin directory (which could accidentally admit Node).
+    const located = spawnSync(bash, ['--noprofile', '--norc', '-c', 'command -v dirname'], { encoding: 'utf8', env });
+    expect(located.status, located.stderr).toBe(0);
+    const tools = path.join(root, 'host-tools'); fs.mkdirSync(tools);
+    fs.symlinkSync(fs.realpathSync(located.stdout.trim()), path.join(tools, 'dirname'));
+  }
   const convert = windows ? '$(cygpath -u "$1")' : '$1';
   const node = windows ? '$(cygpath -u "$2")' : '$2';
   const result = shell(`set -eu\nSTAGE="${convert}"\nNODE_BIN="${node}"\nOSFAM="$3"\n${launcherRecipe}`, [bundle, process.execPath, osfam]);
@@ -45,7 +53,7 @@ function stage(osfam = windows ? 'win32' : process.platform) {
 function invoke(bundle: string, command: string, args: string[] = [], extraEnv: NodeJS.ProcessEnv = {}, input?: string) {
   const convert = windows ? '$(cygpath -u "$1")' : '$1';
   // Exclude system Node: execution must use the runtime in the bundle.
-  return shell(`STAGE="${convert}"\nshift\nPATH="$STAGE/bin:/usr/bin:/bin"\nexport PATH\n${command}`,
+  return shell(`STAGE="${convert}"\nshift\nPATH="$STAGE/bin${windows ? '' : ':$STAGE/../host-tools'}:/usr/bin:/bin"\nexport PATH\n${command}`,
     [bundle, ...args], extraEnv, input);
 }
 

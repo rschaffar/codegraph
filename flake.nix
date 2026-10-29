@@ -48,6 +48,9 @@
               pkgs.nodejs_24
               pkgs.cargo
               pkgs.rustc
+              # Release-archive regression fixtures used by npm test.
+              pkgs.zip
+              pkgs.unzip
             ];
           };
         }
