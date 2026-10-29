@@ -94,9 +94,13 @@ The public API surface is `src/index.ts` — the `CodeGraph` class wires all the
 ### Local Review Board design exception
 
 This local patch series explicitly authorizes a separate **Review Board** view:
-a selected multi-component call graph, freely draggable/expandable nodes and
-multiple movable source cards. Its agreed requirements and implementation plan
-are in `docs/design/review-board-plan.md`; read that before board work.
+an explicitly selected typed-symbol/relationship graph, freely draggable/expandable
+cards and multiple movable source cards. Its agreed requirements and implementation
+plan are in `docs/design/review-board-plan.md`; read that and the companion
+`docs/design/review-board-data-model.md` before board work. Every indexed NodeKind
+and EdgeKind is in scope, not only classes/calls. Connections browsing is separate
+from inclusion: add only chosen symbols, with no automatic neighbour expansion;
+provide Add/Restore/Locate, named hidden items and Undo hide.
 
 The upstream UI specification's "one symbol at a time / no neighbourhood graph"
 rule does **not** apply to this new view. Do not remove or constrain the board to
@@ -104,16 +108,17 @@ satisfy that rule. Existing Map, Symbol, Flow and other reader views keep their
 contracts. Reuse their graph APIs, source/highlight/drift handling, theme,
 navigation and renderer wherever suitable; the exception does not relax security,
 read-only semantics or truthful graph evidence. The isolated sample-data
-clickdummy at `ui/board-prototype.html` is implemented; the live-index board and
-persistence remain planned. Keep the prototype out of the reusable UI package,
-and do not describe it or the Nix packaging commit as delivering the full feature.
+clickdummy at `ui/board-prototype.html` is implemented; the all-kind/Connections
+prototype revision, live-index board and persistence remain planned. Keep the
+prototype out of the reusable UI package, and do not describe it or the Nix
+packaging commit as delivering the full feature.
 
 ### NodeKind / EdgeKind
 
 Defined in `src/types.ts`. Both extractors and resolvers must use these exact strings.
 
 - **NodeKind**: `file`, `module`, `class`, `struct`, `interface`, `trait`, `protocol`, `function`, `method`, `property`, `field`, `variable`, `constant`, `enum`, `enum_member`, `type_alias`, `namespace`, `parameter`, `import`, `export`, `route`, `component`, `union`.
-- **EdgeKind**: `contains`, `calls`, `imports`, `exports`, `extends`, `implements`, `references`, `type_of`, `returns`, `instantiates`, `overrides`, `decorates`.
+- **EdgeKind**: `contains`, `calls`, `imports`, `exports`, `extends`, `implements`, `references`, `type_of`, `returns`, `instantiates`, `overrides`, `decorates`, `navigates`.
 
 ### Multi-agent installer
 
