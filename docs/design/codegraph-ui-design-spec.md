@@ -13,10 +13,13 @@ Prototype sources: `CodeGraph/codegraph-web-prototype/` (`proto.css`, `proto.js`
 ## 1. Principles for existing reader views (non-negotiable)
 
 **Local extension exception:** the separately authorized [Review Board](review-board-plan.md)
-has its own scope and interaction rules: a selected neighbourhood graph, manually
-positioned component/method nodes and multiple movable code cards are intentional.
-The one-symbol restriction and source-coordinate-only placement below do not apply
-to that new view. Existing views remain unchanged; the board reuses their theme,
+has its own scope and interaction rules: an explicitly selected typed-symbol graph,
+manually positioned/expandable cards and multiple movable code cards are intentional.
+Its [data-model inventory](review-board-data-model.md) covers every indexed node
+and edge kind, not just classes and calls. Connections can be browsed without
+adding neighbours; Add/Restore/Locate include only chosen symbols. The one-symbol
+restriction and source-coordinate-only placement below do not apply to that new
+view. Existing views remain unchanged; the board reuses their theme,
 source/navigation facilities, evidence/provenance and security contracts. See the
 root `AGENTS.md` for this patch series' standing guidance.
 
