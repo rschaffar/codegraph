@@ -43,6 +43,8 @@ const APP_ONLY = [
   'App.svelte',
   'App.svelte.d.ts',
   'app.css',
+  // The standalone clickdummy mounts its own canvas and is not a library API.
+  'prototype',
   'components/TopBar.svelte',
   'components/TopBar.svelte.d.ts',
   'lib/router.svelte.js',

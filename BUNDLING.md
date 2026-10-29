@@ -68,6 +68,10 @@ project without changing its index or saving trails:
 CODEGRAPH_UI=1 ./result/bin/codegraph ui /absolute/path/to/project --read-only
 ```
 
+The local review-board clickdummy is available at `/board-prototype.html` on
+that viewer's URL. It is an isolated, session-only synthetic example, not a view
+of the indexed project. See [its design plan and development instructions](docs/design/review-board-plan.md#0-interaction-clickdummy-implemented-review-before-live-integration).
+
 `nix develop` provides Node.js and the native build toolchain for development.
 For installed-package changes, rebuild with `nix build`; `npm run build` in a dev
 shell alone does not rebuild the native kernel.

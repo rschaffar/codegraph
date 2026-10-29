@@ -102,6 +102,17 @@ async function main() {
     const result = await search.json();
     assert.ok(result.results.items.some((node) => node.name === 'hello'));
     console.log('viewer: read-only server, bundled HTML/JavaScript and indexed search passed');
+
+    const prototype = await fetch(`${base}/board-prototype.html`);
+    assert.equal(prototype.status, 200);
+    const prototypeHtml = await prototype.text();
+    assert.match(prototypeHtml, /Review board clickdummy/);
+    const prototypeScript = prototypeHtml.match(/<script[^>]+src="([^"]+)"/);
+    assert.ok(prototypeScript, 'clickdummy must ship its own entry point');
+    const prototypeAsset = await fetch(new URL(prototypeScript[1], base));
+    assert.equal(prototypeAsset.status, 200);
+    assert.ok((await prototypeAsset.text()).length > 100);
+    console.log('clickdummy: isolated HTML and built JavaScript are shipped');
   } finally {
     server.kill('SIGTERM');
     const killTimer = setTimeout(() => server.kill('SIGKILL'), 5_000);
