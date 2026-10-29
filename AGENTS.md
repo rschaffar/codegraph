@@ -91,6 +91,21 @@ The public API surface is `src/index.ts` — the `CodeGraph` class wires all the
 - `src/ui-server/` -- read-only JSON API for the `codegraph ui` browser viewer (`api/`: `node`, `flow`, `map`, `screens`, `steps`, `deadcode`, `trails`, `program`, ...) plus static server; Svelte viewer lives in `ui/` (see `docs/design/codegraph-ui-design-spec.md`). `screens`/`steps`/`program` share one fold (`via`/`when` via `graph/branch-guards.ts`); `api/effects.ts` curates calls that leave the index; `api/route-roots.ts` names where a route's code starts. Derivations rendered by more than one surface belong in `src/graph/`, not `ToolHandler`.
   **Not released yet:** `codegraph ui` / `web` are refused (and hidden from `--help`) unless `CODEGRAPH_UI=1` is set — `src/bin/viewer-gate.ts`. Viewer changelog entries wait in `docs/viewer-launch-changelog.md`, not under `[Unreleased]`. At launch: delete the gate, move those entries back, drop the "not released yet" notes from `site/`.
 
+### Local Review Board design exception
+
+This local patch series explicitly authorizes a separate **Review Board** view:
+a selected multi-component call graph, freely draggable/expandable nodes and
+multiple movable source cards. Its agreed requirements and implementation plan
+are in `docs/design/review-board-plan.md`; read that before board work.
+
+The upstream UI specification's "one symbol at a time / no neighbourhood graph"
+rule does **not** apply to this new view. Do not remove or constrain the board to
+satisfy that rule. Existing Map, Symbol, Flow and other reader views keep their
+contracts. Reuse their graph APIs, source/highlight/drift handling, theme,
+navigation and renderer wherever suitable; the exception does not relax security,
+read-only semantics or truthful graph evidence. The board is planned, not yet
+implemented; do not describe the Nix packaging commit as delivering the feature.
+
 ### NodeKind / EdgeKind
 
 Defined in `src/types.ts`. Both extractors and resolvers must use these exact strings.

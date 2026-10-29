@@ -10,7 +10,15 @@ Design proposal: https://claude.ai/code/artifact/58336c87-9780-4018-8c04-37fe532
 Prototype: https://claude.ai/code/artifact/304bffb6-72d6-49c7-8f3a-9e4f244909f8
 Prototype sources: `CodeGraph/codegraph-web-prototype/` (`proto.css`, `proto.js`, `extract.mjs`, `build.mjs`)
 
-## 1. Principles (non-negotiable)
+## 1. Principles for existing reader views (non-negotiable)
+
+**Local extension exception:** the separately authorized [Review Board](review-board-plan.md)
+has its own scope and interaction rules: a selected neighbourhood graph, manually
+positioned component/method nodes and multiple movable code cards are intentional.
+The one-symbol restriction and source-coordinate-only placement below do not apply
+to that new view. Existing views remain unchanged; the board reuses their theme,
+source/navigation facilities, evidence/provenance and security contracts. See the
+root `AGENTS.md` for this patch series' standing guidance.
 
 1. One symbol at a time — no whole-graph picture, no node-link neighborhood graph (decided).
 2. Code order is the coordinate system — layouts by source line or dependency layer; deterministic; never force-directed.
