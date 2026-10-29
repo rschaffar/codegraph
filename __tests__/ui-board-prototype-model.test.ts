@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { EDGE_KINDS, NODE_KINDS } from '../src/types';
-import { cardFamily, edgeKinds, kindLabel, nodeKinds, relationLabel } from '../ui/src/prototype/catalog';
+import { cardFamily, edgeKinds, kindLabel, nodeKinds, relationLabel } from '../ui/src/lib/board-catalog';
 import { browseConnections, filterSymbols, includeSymbols, nextCodePosition, nextSymbolPosition, projectBoard, representative, scopeIds, targetState } from '../ui/src/prototype/board-model';
 import { children, demoRelations, demoSymbols, initialSelection, symbol } from '../ui/src/prototype/demo-data';
 
@@ -73,6 +73,14 @@ describe('all-kind review board clickdummy', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.evidence).toHaveLength(2);
     expect(board.edges.some((edge) => edge.kind === 'calls' && edge.target === 'factory')).toBe(false);
+  });
+
+  it('keeps hidden pinned members discoverable but suppresses their folded edges', () => {
+    const selection = ['coordinator', 'factory', 'factory.Build'];
+    const board = projectBoard(selection, ['factory.Build'], ['factory']);
+    expect(board.symbols.find((item) => item.symbol.id === 'factory')?.members.some((item) => item.id === 'factory.Build')).toBe(true);
+    expect(board.edges.some((edge) => edge.evidence.some((item) => item.target === 'factory.Build'))).toBe(false);
+    expect(targetState('factory.Build', selection, ['factory.Build'])).toMatchObject({ status: 'hidden', representative: 'factory.Build' });
   });
 
   it('keeps parallel relationship kinds separate and preserves all original evidence once', () => {

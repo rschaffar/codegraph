@@ -5,7 +5,7 @@
   import { tokensByLine } from '../lib/highlight';
   import type { CodeBlock, LineRef } from '../lib/symbol-model';
   import { symbol } from './demo-data';
-  import { kindLabel } from './catalog';
+  import { kindLabel } from '../lib/board-catalog';
   import type { CodeCardData } from './board-model';
 
   let { id, data, selected }: NodeProps<Node<CodeCardData, 'code'>> = $props();

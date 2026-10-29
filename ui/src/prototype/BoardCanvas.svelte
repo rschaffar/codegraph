@@ -2,14 +2,14 @@
   import { onMount, tick } from 'svelte';
   import { Background, Controls, MiniMap, SvelteFlow, MarkerType, useSvelteFlow, type Edge, type Node } from '@xyflow/svelte';
   import '@xyflow/svelte/dist/style.css';
-  import SymbolNode from './SymbolNode.svelte';
+  import SymbolNode from '../components/board/BoardSymbolNode.svelte';
   import CodeCard from './CodeCard.svelte';
-  import RelationEdge from './RelationEdge.svelte';
+  import RelationEdge from '../components/board/BoardRelationEdge.svelte';
   import KindGlyph from '../components/KindGlyph.svelte';
-  import { children, demoSymbols, initialSelection, symbol, type DemoRelation } from './demo-data';
-  import { cardFamily, edgeKinds, kindLabel, nodeKinds, relationLabel } from './catalog';
-  import { browseConnections, filterSymbols, includeSymbols, nextCodePosition, nextSymbolPosition, projectBoard, targetState,
-    type BoardRelation, type CodeCardData, type SymbolAction, type SymbolData } from './board-model';
+  import { children, demoSymbols, initialSelection, symbol } from './demo-data';
+  import { cardFamily, edgeKinds, kindLabel, nodeKinds, relationLabel } from '../lib/board-catalog';
+  import { browseConnections, filterSymbols, includeSymbols, nextCodePosition, nextSymbolPosition, projectBoard, targetState, memberOf,
+    type BoardRelation, type BoardEvidence, type CodeCardData, type SymbolAction, type SymbolData } from './board-model';
 
   type BoardNode = Node<SymbolData, 'symbol'> | Node<CodeCardData, 'code'>;
   const { fitView } = useSvelteFlow();
@@ -36,6 +36,8 @@
   let connectionQuery = $state('');
   let targetSelection = $state<string[]>([]);
   let hideHistory = $state<string[]>([]);
+  let connectionHistory = $state<Array<{ id: string; direction: 'incoming' | 'outgoing'; members: boolean; kind: string; query: string; selected: string[]; scroll: number }>>([]);
+  let locatedMember = $state<string | undefined>();
   let notice = $state('Only the three chosen classes are on the board. Use Connections to choose what to add next.');
   let zIndex = 10;
   const rememberedPositions = new Map<string, { x: number; y: number }>();
@@ -49,7 +51,7 @@
   const groups = $derived.by(() => {
     const grouped = new Map<string, typeof rows>();
     for (const row of rows) {
-      const key = row.target.ownerId ?? row.target.folder;
+      const key = row.target.ownerId ?? row.target.folder ?? row.target.file;
       const list = grouped.get(key) ?? []; list.push(row); grouped.set(key, list);
     }
     return [...grouped].map(([key, entries]) => ({ key, owner: entries[0]?.target.ownerId, entries }));
@@ -89,7 +91,7 @@
       }
       occupied.push({ position, width: 286, height: old?.measured?.height ?? 240 });
       placed.push({ ...old, id: item.symbol.id, type: 'symbol', position, dragHandle: '.board-drag-handle', connectable: false,
-        data: { ...item, expanded: expanded.includes(item.symbol.id), pinned: included.filter((id) => !hidden.includes(id)), act } });
+        data: { ...item, expanded: expanded.includes(item.symbol.id), pinned: included.filter((id) => !hidden.includes(id)), hidden, locatedMember, act } });
     }
     nodes = [...placed, ...nodes.filter((node) => node.type === 'code')];
   }
@@ -119,24 +121,37 @@
     return checked ? [...new Set([...values, id])] : values.filter((item) => item !== id);
   }
   function openConnections(id: string) {
+    if (panel === 'connections') connectionHistory = [...connectionHistory, { id: connectionScope, direction, members: withMembers, kind: connectionKind, query: connectionQuery, selected: [...targetSelection], scroll: document.querySelector('.connections-panel .result-list')?.scrollTop ?? 0 }];
+    else connectionHistory = [];
     connectionScope = id; direction = 'outgoing'; connectionQuery = ''; connectionKind = ''; targetSelection = [];
     withMembers = cardFamily(symbol(id).kind) === 'type' || symbol(id).kind === 'component';
     panel = 'connections'; evidence = null; selectedId = targetState(id, included, hidden).representative;
+  }
+  async function backConnections() {
+    const entry = connectionHistory.at(-1);
+    if (!entry) return;
+    connectionHistory = connectionHistory.slice(0, -1);
+    connectionScope = entry.id; direction = entry.direction; withMembers = entry.members;
+    connectionKind = entry.kind; connectionQuery = entry.query; targetSelection = entry.selected;
+    await tick(); const list = document.querySelector('.connections-panel .result-list');
+    if (list) list.scrollTop = entry.scroll;
   }
   async function locate(id: string) {
     const state = targetState(id, included, hidden);
     if (state.status !== 'visible') return;
     const owner = state.representative;
+    locatedMember = owner !== id ? memberOf(id, owner) ?? undefined : undefined;
     if (owner !== id) {
       expanded = [...new Set([...expanded, owner])]; limits = { ...limits, [owner]: children(owner).length }; refresh();
     }
     selectedId = owner; nodes = nodes.map((node) => ({ ...node, selected: node.id === owner }));
     await tick(); await fitView({ nodes: [{ id: owner }], padding: 0.5, maxZoom: 1, duration: 200 });
-    notice = owner === id ? `Located ${symbol(id).qualifiedName}.` : `${symbol(id).qualifiedName} is folded inside ${symbol(owner).name}. Pin it separately to give it its own card.`;
+    notice = owner === id ? `Located ${symbol(id).qualifiedName}.` : `${symbol(id).qualifiedName} is inside ${symbol(owner).name}${locatedMember && locatedMember !== id ? ` → ${symbol(locatedMember).name}` : ''}. The containing row is highlighted; Pin separately reveals the exact symbol as its own card.`;
   }
   function act(action: SymbolAction, id: string) {
     evidence = null;
     if (action === 'connections') openConnections(id);
+    else if (action === 'restore') restore(id);
     else if (action === 'hide') {
       hidden = [...new Set([...hidden, id])]; hideHistory = [...hideHistory.filter((item) => item !== id), id];
       if (selectedId === id) selectedId = null; refresh();
@@ -171,11 +186,11 @@
     if (fit) { panel = null; evidence = null; readCard(id); }
     return id;
   }
-  async function compare(edge: DemoRelation) { openCode(edge.source, false); openCode(edge.target, false); evidence = null; panel = null; await fitCode(); }
+  async function compare(edge: BoardEvidence) { openCode(edge.source, false); openCode(edge.target, false); evidence = null; panel = null; await fitCode(); }
   function reset(mode: 'review' | 'gallery' | 'empty' = 'review') {
     included = mode === 'empty' ? [] : mode === 'gallery' ? [...nodeKinds.map((kind) => demoSymbols.find((item) => item.kind === kind)!.id), 'unknown'] : [...initialSelection];
     hidden = []; expanded = []; limits = {}; nodes = []; selectedId = null; evidence = null; panel = null; canvasKind = ''; showStructure = false;
-    query = ''; folder = ''; libraryKind = ''; librarySelection = []; targetSelection = []; hideHistory = []; zIndex = 10;
+    query = ''; folder = ''; libraryKind = ''; librarySelection = []; targetSelection = []; hideHistory = []; connectionHistory = []; locatedMember = undefined; zIndex = 10;
     rememberedPositions.clear(); expandedHeights.clear(); refresh();
     notice = mode === 'gallery' ? 'Kind gallery: one of every indexed node kind plus an unknown-kind fallback. All additions are explicit.' : 'Choose symbols, then browse Connections. Adding never expands their neighbourhood.';
     if (included.length) void fitGraph();
@@ -255,13 +270,13 @@
       </aside>
     {:else if panel === 'connections'}
       <aside class="panel connections-panel" aria-label="Connections browser">
-        <div class="panel-heading"><h2>Connections</h2><button aria-label="Close connections" onclick={() => panel = null}>×</button></div>
+        <div class="panel-heading">{#if connectionHistory.length}<button class="back" aria-label="Back to previous connections" onclick={backConnections}>← Back</button>{/if}<h2>Connections</h2><button aria-label="Close connections" onclick={() => panel = null}>×</button></div>
         <div class="scope"><KindGlyph kind={symbol(connectionScope).kind} /><strong>{symbol(connectionScope).qualifiedName}</strong><small>{kindLabel(symbol(connectionScope).kind)}</small></div>
         <div class="direction"><button class:active={direction === 'outgoing'} aria-pressed={direction === 'outgoing'} onclick={() => { direction = 'outgoing'; targetSelection = []; }}>Outgoing</button><button class:active={direction === 'incoming'} aria-pressed={direction === 'incoming'} onclick={() => { direction = 'incoming'; targetSelection = []; }}>Incoming</button></div>
         {#if children(connectionScope).length}<label class="scope-toggle"><input type="checkbox" bind:checked={withMembers} onchange={() => targetSelection = []} /> Include contained members</label>{/if}
         <label class="field">Relationship<select aria-label="Connection relationship filter" bind:value={connectionKind}><option value="">All relationship kinds</option>{#each availableRelations as kind}<option value={kind}>{kindLabel(kind)}</option>{/each}</select></label>
         <label class="field">Search targets<input aria-label="Search connection targets" placeholder="Target, kind or namespace…" bind:value={connectionQuery} /></label>
-        <p class="panel-hint">{rows.length} targets · {withMembers ? 'symbol + contained members' : 'this symbol only'}. Add only what you choose. Counts are sample evidence, not execution frequency.</p>
+        <p class="panel-hint">{rows.length} targets · {withMembers ? 'symbol + members' : 'this symbol only'} · sample evidence</p>
         <div class="batch"><button disabled={!targetSelection.length} onclick={addSelectedTargets}>Add selected ({targetSelection.length})</button>{#if targetSelection.length}<button onclick={() => targetSelection = []}>Clear</button>{/if}</div>
         <div class="result-list">
           {#each groups as group (group.key)}
@@ -272,7 +287,7 @@
                 <label class="choice"><input type="checkbox" aria-label={`Select target ${row.target.qualifiedName}`} disabled={row.status === 'visible'} checked={targetSelection.includes(row.target.id)} onchange={(event) => targetSelection = checkSelection(targetSelection, row.target.id, event.currentTarget.checked)} /><KindGlyph kind={row.target.kind} /><strong>{row.target.name}</strong></label>
                 <small>{kindLabel(row.target.kind)} · {row.target.folder}</small>
                 <div class="relationship-tags">{#each [...new Set(row.evidence.map((edge) => edge.kind))] as kind}<span>{kindLabel(kind)}</span>{/each}</div>
-                <p class="target-status">{row.status === 'visible' ? 'On board' : row.status === 'hidden' ? 'Hidden' : 'Not on board'}{row.representative !== row.target.id ? ` in ${symbol(row.representative).name}` : ''}</p>
+                <p class="target-status">{row.status === 'visible' ? row.representative === row.target.id ? 'Pinned on board' : 'Folded' : row.status === 'hidden' ? 'Hidden' : 'Not on board'}{row.representative !== row.target.id ? ` in ${symbol(row.representative).name}` : ''}</p>
                 <div class="row-actions"><button aria-label={`${row.status === 'visible' ? 'Locate' : row.status === 'hidden' ? 'Restore' : 'Add'} target ${row.target.qualifiedName}`} onclick={() => addTarget(row.target.id)}>{row.status === 'visible' ? 'Locate' : row.status === 'hidden' ? `Restore ${symbol(row.representative).name}` : 'Add to board'}</button>
                   {#if row.status === 'visible' && row.representative !== row.target.id}<button aria-label={`Pin target ${row.target.qualifiedName} separately`} onclick={() => add([row.target.id])}>Pin separately</button>{/if}<button onclick={() => openCode(row.target.id)}>Source</button><button onclick={() => openConnections(row.target.id)}>Connections</button></div>
                 <details><summary>{row.evidence.length} sample evidence {row.evidence.length === 1 ? 'item' : 'items'}</summary>{#each row.evidence as edge (edge.id)}<div class="evidence-row"><b>{symbol(edge.source).qualifiedName}</b> → {relationLabel(edge.kind)} → <b>{symbol(edge.target).qualifiedName}</b><small>{edge.file}:{edge.line}</small>{#if edge.via}<p>{edge.via}</p>{/if}<button onclick={() => compare(edge)}>Compare source ↗</button></div>{/each}</details>
@@ -346,7 +361,16 @@
   .batch, .direction { display: flex; gap: 10px; padding: 0 16px 12px; flex-wrap: wrap; }
   .batch button, .direction button { padding: 7px; border: 1px solid var(--rule-soft); font-size: 11px; }
   .direction .active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
-  .scope { display: flex; align-items: center; gap: 8px; padding: 14px 16px; flex-wrap: wrap; }
+  .connections-panel { overflow: hidden; }
+  .connections-panel > :not(.result-list) { flex-shrink: 0; }
+  .connections-panel .result-list { overflow: auto; min-height: 100px; flex: 1; }
+  .connections-panel .field { margin-bottom: 5px; }
+  .connections-panel .field input, .connections-panel .field select { padding: 5px 7px; }
+  .connections-panel .panel-hint { margin: 4px 0; font-size: 10px; }
+  .connections-panel .direction, .connections-panel .batch { padding-bottom: 5px; }
+  .connections-panel .scope-toggle { padding-bottom: 5px; }
+  .back { font-size: 11px !important; color: var(--accent); }
+  .scope { display: flex; align-items: center; gap: 8px; padding: 7px 16px; flex-wrap: wrap; }
   .scope strong { font: 12px var(--mono); overflow-wrap: anywhere; }
   .scope small { font-size: 10px; color: var(--ink-3); }
   .scope-toggle { padding: 0 16px 14px; }
