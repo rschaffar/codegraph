@@ -5,7 +5,7 @@ import { WASM_RUNTIME_FLAGS } from './src/extraction/wasm-runtime-flags';
 
 /**
  * One process, two Vitest projects. The engine stays in Node; the UI package
- * test alone gets Svelte compilation, jsdom and browser resolution conditions.
+ * and Board component tests get Svelte compilation, jsdom and browser resolution conditions.
  */
 export default defineConfig({
   test: {
@@ -87,7 +87,7 @@ export default defineConfig({
               replacement: fileURLToPath(new URL('./__tests__/lazy-frameworks-eager.ts', import.meta.url)),
             },
           ],
-          exclude: ['**/node_modules/**', '**/dist/**', '__tests__/ui-package.test.ts'],
+          exclude: ['**/node_modules/**', '**/dist/**', '__tests__/ui-package.test.ts', '__tests__/ui-board-shortcuts.test.ts'],
         },
       },
       {
@@ -101,7 +101,7 @@ export default defineConfig({
         test: {
           name: 'ui',
           globals: true,
-          include: ['__tests__/ui-package.test.ts'],
+          include: ['__tests__/ui-package.test.ts', '__tests__/ui-board-shortcuts.test.ts'],
           environment: 'jsdom',
           server: {
             deps: {

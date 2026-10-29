@@ -62,6 +62,8 @@
     type FileArc,
     type FileCallRow,
   } from '../lib/filecode-model';
+  import { getGraphAdapter } from '../lib/adapter';
+  import { addToBoard } from '../lib/board-requests.svelte';
   import { liveRefresh } from '../lib/live.svelte';
   import { plural, synthesizedBy, type Connector, type LineRef } from '../lib/symbol-model';
   import { walkTo } from '../lib/walk';
@@ -468,6 +470,9 @@
           </span>
           <span class="loc">{payload.file.path}</span>
           <div class="spacer"></div>
+          {#if getGraphAdapter().board && payload.file.id}
+            <button type="button" class="board-add" title="Add only this indexed file node; choose members separately on the Board" onkeydown={(event) => event.stopPropagation()} onclick={() => { if (payload?.file.id) addToBoard([payload.file.id]); }}>Add to board</button>
+          {/if}
           <FileModeTabs path={payload.file.path} {line} source={true} />
         </div>
 
@@ -622,6 +627,15 @@
   .spacer {
     flex: 1 1 auto;
   }
+
+  .board-add {
+    border: 1px solid var(--rule-soft);
+    padding: 3px 7px;
+    color: var(--accent);
+    font-size: 11.5px;
+  }
+
+  .board-add:hover { border-color: var(--accent); }
 
   .kindword {
     color: var(--ink-3);

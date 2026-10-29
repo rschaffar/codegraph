@@ -75,9 +75,9 @@ export interface StepsHrefOptions {
 /**
  * Where the components send the reader.
  *
- * Implement all of it: a half-implemented driver produces a screen where some
- * rows navigate the host and others silently jump to a hash the host does not
- * serve.
+ * Implement the reader routes: a half-implemented driver produces a screen
+ * where rows navigate to an address the host does not serve. Board is optional
+ * so existing reader-only hosts do not have to adopt that capability.
  */
 export interface NavigationDriver {
   /**
@@ -95,6 +95,8 @@ export interface NavigationDriver {
   screensHref(): string;
   stepsHref(opts?: StepsHrefOptions): string;
   deadHref(opts?: DeadCodeHrefOptions): string;
+  /** Optional selected-symbol Board route. Defaults to the standalone hash. */
+  boardHref?(): string;
   /** Go to an href this driver built. */
   navigate(href: string, opts?: { replace?: boolean }): void;
   /** Back one entry in the host's history. */
@@ -184,6 +186,10 @@ export const hashNavigation: NavigationDriver = {
     return `#/dead${query(params)}`;
   },
 
+  boardHref() {
+    return '#/board';
+  },
+
   navigate(href, opts = {}) {
     const target = href.startsWith('#') ? href : `#${href}`;
     if (opts.replace) {
@@ -267,6 +273,10 @@ export function stepsHref(opts: StepsHrefOptions = {}): string {
 
 export function deadHref(opts: DeadCodeHrefOptions = {}): string {
   return driver.deadHref(opts);
+}
+
+export function boardHref(): string {
+  return driver.boardHref?.() ?? '#/board';
 }
 
 export function navigate(href: string, opts: { replace?: boolean } = {}): void {

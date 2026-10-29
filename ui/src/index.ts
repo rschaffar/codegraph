@@ -61,6 +61,7 @@ export type {
 
 export {
   back,
+  boardHref,
   deadHref,
   entryHref,
   fileHref,
@@ -83,6 +84,7 @@ export type {
 
 /** The wire vocabulary an adapter answers in. Types only — no runtime. */
 export * from './lib/wire';
+export type * from './lib/board-wire';
 
 /* ----------------------------------------------------------- the screens -- */
 
@@ -100,6 +102,8 @@ export { default as FileSourceView } from './views/FileCodeView.svelte';
 export { default as EntryPointsView } from './views/EntryView.svelte';
 /** Symbols nothing reaches, grouped by file, with every exclusion printed. */
 export { default as DeadCodeView } from './views/DeadCodeView.svelte';
+/** Explicit single-project symbol graph with independent source cards. */
+export { default as ReviewBoardView } from './views/ReviewBoardView.svelte';
 
 /* -------------------------------------------------------- the furniture -- */
 
@@ -124,6 +128,7 @@ export { default as TypeHierarchy } from './components/symbol/TypeHierarchy.svel
 
 /* ------------------------------------------------------------- the state -- */
 
+export { boardRequests, addToBoard } from './lib/board-requests.svelte';
 export { trail, resolveTrailNames } from './lib/trail.svelte';
 export { encodeTrail, decodeTrail, hopLabel } from './lib/trail-codec';
 export type { HopDirection, TrailHop } from './lib/trail-codec';
@@ -142,6 +147,9 @@ export type { WalkTarget } from './lib/walk';
    Pure functions: no DOM, no fetch, no state. A host that wants a different
    screen over the same answers builds it out of these rather than out of the
    payloads, so its arithmetic is the arithmetic the shipped screens use. */
+
+export { createBoardModel, edgeLaneMap, mergeBoardFacts, BOARD_MEMBER_PAGE_SIZE, BOARD_MEMBER_REVEAL_LIMIT } from './lib/board-model';
+export type { BoardSymbol, BoardEvidence, BoardRelation, BoardMemberPageState, BoardMemberRow, BoardPresentationOptions } from './lib/board-model';
 
 export { decodeLine, plainLine, tokenClass, tokensByLine } from './lib/highlight';
 export type { Token, TokenClass, WireHighlight, WireToken } from './lib/highlight';
