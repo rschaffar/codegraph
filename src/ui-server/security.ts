@@ -48,7 +48,8 @@ export const READ_METHODS: readonly string[] = ['GET', 'HEAD'];
 
 /**
  * Methods that answer under `/api/` only, and only for a request carrying
- * {@link WRITE_HEADER}. The viewer's one write is a saved trail.
+ * {@link WRITE_HEADER}. Mutations are restricted by API routing to saved
+ * trail/board metadata; in-memory board resolution also accepts a JSON body.
  */
 export const WRITE_METHODS: readonly string[] = ['POST', 'DELETE'];
 

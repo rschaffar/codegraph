@@ -259,10 +259,9 @@ afterAll(async () => {
 describe('GET /api', () => {
   it('lists the endpoints it answers', async () => {
     const body = await getJson('/api');
-    // Not a blanket claim any more (CG-60): saved trails are the one thing
-    // this server writes, and it names it rather than implying there is none.
+    // Only the explicitly named project-local metadata endpoints write.
     expect(body.readOnly).toBe(false);
-    expect(body.writes).toEqual(['POST /api/trails', 'DELETE /api/trails/<id>']);
+    expect(body.writes).toEqual(['POST /api/trails', 'DELETE /api/trails/<id>', 'POST /api/boards', 'DELETE /api/boards/<id>']);
     const paths = body.endpoints.map((e: any) => e.path);
     expect(paths).toEqual(
       expect.arrayContaining([
@@ -272,6 +271,11 @@ describe('GET /api', () => {
         '/api/source',
         '/api/file/<path>',
         '/api/routes',
+        '/api/board',
+        '/api/board/search',
+        '/api/board/connections',
+        '/api/board/evidence',
+        '/api/boards',
       ])
     );
   });

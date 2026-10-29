@@ -75,7 +75,7 @@ export interface UiRequestContext {
   /**
    * The request method. `GET` or `HEAD` for every read; `POST` or `DELETE`
    * only for a request that already passed {@link isWriteRequest}, which is
-   * `/api/trails` and nothing else.
+   * trail/board metadata writes (or in-memory board resolution with a body).
    */
   method: string;
 }
