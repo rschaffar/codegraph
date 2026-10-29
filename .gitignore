@@ -3,6 +3,8 @@ node_modules/
 
 # Build output
 dist/
+/result
+/result-*
 
 # svelte-package's scratch dir (ui/ library build)
 .svelte-kit/

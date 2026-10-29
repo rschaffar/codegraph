@@ -43,6 +43,63 @@ on one Linux runner). Cross-compilation isn't a concern; only *run-testing* a
 bundle needs the target platform (or emulation, e.g. `docker run --platform
 linux/amd64`).
 
+## Build from source with Nix
+
+The flake builds one `codegraph` package on `x86_64-linux` and `aarch64-linux`:
+
+```bash
+nix build .#codegraph
+./result/bin/codegraph --version
+nix run . -- status
+nix flake check
+```
+
+The package compiles the engine, standalone browser viewer and native extraction
+kernel from this checkout. It includes the WASM grammars and production npm
+dependencies, using Nix's Node.js 24 runtime instead of downloading or repatching
+a release binary. The reusable/private UI library, website, telemetry services,
+installers and release archives are not built as separate outputs. Existing CLI
+installer commands remain available but are not run during the build.
+
+The viewer retains its upstream experimental opt-in. To view an already indexed
+project without changing its index or saving trails:
+
+```bash
+CODEGRAPH_UI=1 ./result/bin/codegraph ui /absolute/path/to/project --read-only
+```
+
+`nix develop` provides Node.js and the native build toolchain for development.
+For installed-package changes, rebuild with `nix build`; `npm run build` in a dev
+shell alone does not rebuild the native kernel.
+
+`flake.lock`, `package-lock.json` and `codegraph-kernel/Cargo.lock` pin the build
+inputs. After changing npm dependencies, update `npmDepsHash` in
+`nix/package.nix` (temporarily use `lib.fakeHash` and take the actual hash from
+the failed dependency-fetch build). Native registry dependencies are derived
+from `Cargo.lock` without a separately maintained Cargo hash.
+
+The package's install checks require successful native loading and extraction,
+exercise CLI indexing/querying with native and WASM extraction, and start the
+read-only viewer to verify its HTML, JavaScript and indexed search API. These
+are packaging smoke tests, not the full test suite or browser interaction tests.
+Linux ARM64 is exposed for native builds on that platform; exposing an output
+is not evidence that it has been built on every architecture.
+
+A consuming flake can pin a committed local patch branch without publishing it:
+
+```nix
+inputs.codegraph.url = "git+file:///absolute/path/to/codegraph?ref=nix/source-build";
+# In the consumer's package list:
+# inputs.codegraph.packages.${pkgs.stdenv.hostPlatform.system}.codegraph
+```
+
+The consumer's lock file chooses the exact commit; editing or committing this
+repository does not advance an existing consumer pin. The local repository must
+remain available when updating that input. Flake builds use Git-tracked files,
+so add new source files to Git before building. Install and upgrade this package
+through Nix rather than `codegraph upgrade`, whose self-update cannot replace
+an immutable Nix store path.
+
 ## Install channels (all deliver the same bundle)
 
 1. **`curl | sh`** ([`install.sh`](install.sh)) — no Node required; ideal for a
