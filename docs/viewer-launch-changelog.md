@@ -15,7 +15,7 @@ These describe `codegraph ui` and its screens. They were taken out of `## [Unrel
 
 ## New Features
 
-- A local Review Board clickdummy at `/board-prototype.html` lets reviewers try component selection, dragging, method expansion and side-by-side source cards with clearly labelled synthetic data and no saved state.
+- A local Review Board clickdummy at `/board-prototype.html` lets reviewers explore every symbol and relationship kind, explicitly add connected targets, restore hidden items and compare movable source cards using clearly labelled synthetic data with no saved state.
 
 - **The Steps tab draws what an Angular screen does.** Each handler a template binds is drawn with the event that fires it, like `submitForm` on the form's `(ngSubmit)` or `toggleFavorite` on a button's `(click)`, followed by the requests it sends and the screen it opens. That includes handlers in child components the screen renders. Re-index Angular projects after upgrading.
 
