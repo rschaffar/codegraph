@@ -1,9 +1,9 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import { Handle, Position, useUpdateNodeInternals, type Node, type NodeProps } from '@xyflow/svelte';
-  import KindGlyph from '../components/KindGlyph.svelte';
-  import { cardFamily, kindLabel } from './catalog';
-  import type { SymbolData } from './board-model';
+  import KindGlyph from '../KindGlyph.svelte';
+  import { cardFamily, kindLabel } from '../../lib/board-catalog';
+  import type { SymbolData } from '../../lib/board-model';
 
   let { id, data, selected }: NodeProps<Node<SymbolData, 'symbol'>> = $props();
   const updateNodeInternals = useUpdateNodeInternals();
@@ -22,7 +22,7 @@
   <Handle type="target" position={Position.Left} id="in" isConnectable={false} style="top: 27px" />
   <Handle type="source" position={Position.Right} id="out" isConnectable={false} style="top: 27px" />
   <div class="description nodrag nopan">
-    <div class="identity"><span class="kind">{kindLabel(data.symbol.kind)}</span><span>{data.symbol.folder}</span></div>
+    <div class="identity"><span class="kind">{kindLabel(data.symbol.kind)}</span><span>{data.symbol.folder ?? data.symbol.file}</span></div>
     <p>{data.symbol.purpose}</p>
   </div>
   <div class="actions nodrag nopan">
@@ -34,13 +34,14 @@
     {#if data.expanded}
       <div class="members nodrag nopan">
         {#each data.members as member (member.id)}
-          <div class="member" data-member={member.id}>
-            <Handle type="target" position={Position.Left} id={`in-${member.id}`} isConnectable={false} />
+          <div class="member" class:hidden={data.hidden.includes(member.id)} class:located={data.locatedMember === member.id} data-member={member.id}>
+            {#if !data.hidden.includes(member.id)}<Handle type="target" position={Position.Left} id={`in-${member.id}`} isConnectable={false} />{/if}
             <KindGlyph kind={member.kind} />
             <button class="member-name" title={`${kindLabel(member.kind)} · ${member.qualifiedName}`} aria-label={`Open ${member.qualifiedName} source`} onclick={() => data.act('code', member.id)}>{member.name}</button>
-            {#if data.pinned.includes(member.id)}<button class="pinned" aria-label={`Locate ${member.qualifiedName}`} onclick={() => data.act('locate', member.id)}>pinned</button>{/if}
+            {#if data.hidden.includes(member.id)}<button class="pinned" aria-label={`Restore member ${member.qualifiedName}`} onclick={() => data.act('restore', member.id)}>Hidden · Restore</button>
+            {:else if data.pinned.includes(member.id)}<button class="pinned" aria-label={`Locate ${member.qualifiedName}`} onclick={() => data.act('locate', member.id)}>pinned</button>{/if}
             <button class="links" aria-label={`Connections for ${member.qualifiedName}`} onclick={() => data.act('connections', member.id)}>Links</button>
-            <Handle type="source" position={Position.Right} id={`out-${member.id}`} isConnectable={false} />
+            {#if !data.hidden.includes(member.id)}<Handle type="source" position={Position.Right} id={`out-${member.id}`} isConnectable={false} />{/if}
           </div>
         {/each}
         {#if data.members.length < data.memberCount}<button class="show-more" onclick={() => data.act('more', id)}>Show more ({data.memberCount - data.members.length} remaining)</button>{/if}
@@ -69,6 +70,8 @@
   .member-toggle span { color: var(--ink-3); padding-left: 5px; }
   .members { border-top: 1px solid var(--rule-soft); }
   .member { position: relative; display: flex; align-items: center; gap: 7px; padding: 9px 12px; border-bottom: 1px solid var(--rule-faint); }
+  .member.hidden { background: var(--paper-2); color: var(--ink-3); }
+  .member.located { outline: 1px solid var(--accent); outline-offset: -1px; background: var(--accent-soft); }
   .member-name { font: 11px var(--mono); text-align: left; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .member-name:hover { text-decoration: underline; }
   .links, .pinned { color: var(--accent); font-size: 10px; }

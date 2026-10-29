@@ -1,5 +1,5 @@
-// Prototype presentation catalogue only. Tests compare it with the engine;
-// importing the engine here would couple this isolated browser entry to Node.
+// Shared viewer presentation catalogue. Tests compare it with the engine;
+// importing the engine here would couple browser components to Node.
 export const nodeKinds = [
   'file', 'module', 'class', 'struct', 'interface', 'trait', 'protocol',
   'function', 'method', 'property', 'field', 'variable', 'constant', 'enum',
