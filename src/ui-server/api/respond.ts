@@ -95,9 +95,9 @@ export function fail(res: ServerResponse, err: unknown, method: string): true {
 /**
  * Bytes a request body may carry.
  *
- * The only body this server reads is a saved trail: a name and up to 64 node
- * ids. 64 KB is generous for that and small enough that a runaway client cannot
- * make the process hold a megabyte per socket.
+ * Default cap for small bodies such as saved trails. Routes with larger,
+ * separately bounded inputs can request an explicit cap; all readers count
+ * incoming bytes rather than trusting Content-Length.
  */
 export const MAX_BODY_BYTES = 64 * 1024;
 
@@ -111,16 +111,16 @@ export const MAX_BODY_BYTES = 64 * 1024;
  *
  * @throws {ApiError} `bad-request` for a body that is too large or is not JSON.
  */
-export async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+export async function readJsonBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
   try {
     for await (const chunk of req) {
       const buf = chunk as Buffer;
       size += buf.length;
-      if (size > MAX_BODY_BYTES) {
+      if (size > maxBytes) {
         req.destroy();
-        throw badRequest(`That request body is too large (max ${MAX_BODY_BYTES} bytes).`);
+        throw badRequest(`That request body is too large (max ${maxBytes} bytes).`);
       }
       chunks.push(buf);
     }

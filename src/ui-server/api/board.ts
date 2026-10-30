@@ -122,6 +122,23 @@ function excludedSymbols(counts: BoardExcludedCounts): BoardExclusions {
   return { symbols: counts, relations: noBoardExclusions() };
 }
 
+/** Projection selections may exceed HTTP URL/header limits, but remain byte-bounded. */
+export const MAX_BOARD_PROJECTION_BODY_BYTES = 1024 * 1024;
+export function parseBoardProjectionBody(raw: unknown): URLSearchParams {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw badRequest('Expected a Board projection JSON object.');
+  const value = raw as Record<string, unknown>;
+  if (Object.keys(value).some((key) => key !== 'ids' && !filterKeys.includes(key))) throw badRequest('Unknown Board projection property.');
+  if (!Array.isArray(value.ids) || value.ids.length > MAX_BOARD_SELECTION || value.ids.some((id) => typeof id !== 'string')) {
+    throw badRequest(`Board ids must contain at most ${MAX_BOARD_SELECTION} symbol IDs.`);
+  }
+  const query = new URLSearchParams({ ids: JSON.stringify(value.ids) });
+  for (const key of filterKeys) if (value[key] !== undefined) {
+    if (typeof value[key] !== 'boolean') throw badRequest(`Board ${key} must be a boolean.`);
+    query.set(key, value[key] ? '1' : '0');
+  }
+  return query;
+}
+
 export function buildBoard(cg: CodeGraph, query: URLSearchParams): BoardProjection {
   validate(query, ['ids', ...filterKeys]);
   const viewFilters = filters(query);
