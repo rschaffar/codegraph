@@ -361,7 +361,7 @@ export function createHttpAdapter(options: HttpAdapterOptions = {}): GraphAdapte
     return call<T>(path, { headers: { accept: 'application/json' } }, signal);
   }
 
-  /** A write: the marker header, and a JSON body when there is one to send. */
+  /** Marker-gated request with an optional JSON body; POST can also be a bounded read. */
   function write<T>(path: string, method: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     const headers: Record<string, string> = {
       accept: 'application/json',
@@ -376,7 +376,7 @@ export function createHttpAdapter(options: HttpAdapterOptions = {}): GraphAdapte
   }
 
   return {
-    board: (ids, signal, filters = {}) => { const params = boardParams(filters); params.set('ids', JSON.stringify(ids)); return getJson<BoardSnapshot>(`api/board${query(params)}`, signal); },
+    board: (ids, signal, filters = {}) => write<BoardSnapshot>('api/board', 'POST', { ids, ...filters }, signal),
     boardGroups: (request, signal) => getJson<BoardGroups>(`api/board/groups${query(boardParams(request))}`, signal),
     boardMembers: (request, signal) => getJson<BoardMembers>(`api/board/members${query(boardParams(request))}`, signal),
     boardSearch: (request, signal) => getJson<BoardSearch>(`api/board/search${query(boardParams(request))}`, signal),

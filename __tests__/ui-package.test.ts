@@ -788,14 +788,18 @@ describe('@colbymchenry/codegraph-ui — the seams', () => {
     expect(asked[3]).toBe('api/nodes?id=a&id=b');
   });
 
-  it('keeps Board transport optional and encodes all-kind queries and marker-gated metadata writes', async () => {
+  it('keeps Board transport optional and uses marker-gated body projection with query-based discovery', async () => {
     const asked: Array<{ url: string; init?: RequestInit }> = [];
     const adapter = createHttpAdapter({ fetch: async (url, init) => {
       asked.push({ url: String(url), init });
       return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
     } });
-    await adapter.board!(['method:x@a,b.ts:3']);
-    expect(JSON.parse(new URL(asked[0]!.url, 'http://localhost').searchParams.get('ids')!)).toEqual(['method:x@a,b.ts:3']);
+    const controller = new AbortController();
+    await adapter.board!(['method:x@a,b.ts:3'], controller.signal, { tests: true, generated: false, uncertain: true });
+    expect(asked[0]!.url).toBe('api/board'); expect(asked[0]!.init?.method).toBe('POST');
+    expect(asked[0]!.init?.signal).toBe(controller.signal);
+    expect(asked[0]!.init?.headers).toMatchObject({ 'X-CodeGraph-UI': '1', 'content-type': 'application/json' });
+    expect(JSON.parse(asked[0]!.init?.body as string)).toEqual({ ids: ['method:x@a,b.ts:3'], tests: true, generated: false, uncertain: true });
     await adapter.boardConnections!({ id: 'method:x', members: true, direction: 'incoming', kind: 'type_of' });
     const query = new URL(asked[1]!.url, 'http://localhost').searchParams;
     expect(query.get('kind')).toBe('type_of'); expect(query.get('members')).toBe('1');

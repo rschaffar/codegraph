@@ -48,7 +48,8 @@ import { GraphSession } from './session';
 import { ApiError, badRequest, fail, notFound, ok, readJsonBody } from './respond';
 import { buildStats } from './stats';
 import { buildSearch } from './search';
-import { buildBoard, buildBoardSearch, buildBoardConnections, buildBoardEvidence, buildBoardGroups, buildBoardMembers } from './board';
+import { buildBoard, buildBoardSearch, buildBoardConnections, buildBoardEvidence, buildBoardGroups, buildBoardMembers,
+  parseBoardProjectionBody, MAX_BOARD_PROJECTION_BODY_BYTES } from './board';
 import { buildNode } from './node';
 import { buildSource } from './source';
 import { buildFile } from './file';
@@ -180,7 +181,7 @@ const API_INDEX = {
   endpoints: [
     { path: '/api/stats', description: 'Index state, graph counts, detected frameworks.' },
     { path: '/api/search', description: 'Ranked symbol search.', params: ['q', 'limit'] },
-    { path: '/api/board', description: 'Explicit all-kind Board selection and bounded contains projection.', params: ['ids', 'tests', 'generated', 'uncertain'] },
+    { path: '/api/board', description: 'Explicit all-kind Board projection. POST a bounded JSON selection; GET/HEAD query compatibility remains.', methods: ['GET', 'HEAD', 'POST'], params: ['ids', 'tests', 'generated', 'uncertain'] },
     { path: '/api/board/search', description: 'All-kind Board symbol, folder and namespace enumeration.', params: ['q', 'kind', 'path', 'namespace', 'offset', 'limit', 'tests', 'generated', 'uncertain'] },
     { path: '/api/board/groups', description: 'Indexed folder/namespace groups with exact selection preview counts.', params: ['type', 'q', 'offset', 'limit', 'tests', 'generated', 'uncertain'] },
     { path: '/api/board/members', description: 'Paged direct contains children in source order, beyond the projection scope cap.', params: ['id', 'offset', 'limit', 'tests', 'generated', 'uncertain'] },
@@ -273,9 +274,13 @@ export function createGraphApi(options: GraphApiOptions): GraphApi {
         readOnly: options.readOnly === true,
         readOnlyReason: options.readOnly === true ? 'This viewer is running read-only; board metadata cannot be saved or deleted.' : null,
       })) return true;
-      // Writes first: they are the only requests that carry a body, and
-      // routing them beside the readers would put a `case` that mutates in a
-      // switch every other arm of which is a query.
+      // A marker-gated body-based read, available even when metadata is read-only.
+      if (ctx.method === 'POST' && route === '/api/board') {
+        if (ctx.query.size) throw badRequest('POST Board projection parameters belong in the JSON body, not the query.');
+        const query = parseBoardProjectionBody(await readJsonBody(req, MAX_BOARD_PROJECTION_BODY_BYTES));
+        return ok(res, buildBoard(session.acquire(), query), ctx.method);
+      }
+      // Keep metadata mutations separate from readers, regardless of HTTP method.
       if (ctx.method === 'POST' || ctx.method === 'DELETE') {
         return await dispatchWrite(route, req, res, ctx, session, trails);
       }
