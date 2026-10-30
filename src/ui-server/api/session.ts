@@ -1,9 +1,10 @@
 /**
  * The one open handle on the project's index.
  *
- * `CodeGraph.openSync` costs tens of milliseconds and runs pending migrations,
- * so it happens once for the life of the server rather than once per request.
- * That leaves two things this module has to get right:
+ * The viewer always opens SQLite read-only, independently of metadata-saving
+ * permission. It never migrates or repairs an index. Opening costs tens of
+ * milliseconds, so a healthy handle is retained for the life of the server.
+ * It also has to handle these lifecycle boundaries:
  *
  * - **A missing index is guidance, not a stack trace.** `codegraph ui` refuses
  *   to start without one, but a user can delete `.codegraph/` while the viewer
@@ -133,41 +134,32 @@ export class GraphSession {
    */
   acquire(): CodeGraph {
     const current = identify(this.dbPath);
-
-    if (this.cg !== null) {
-      if (sameFile(this.identity, current)) {
-        // Same file, but somebody wrote to it. SQLite itself is fine — a WAL
-        // reader sees the new commits — but our in-memory node cache is not,
-        // so it goes. One `stat` already paid for; clearing a bounded Map is
-        // the whole cost.
-        if (!sameContent(this.identity, current)) {
-          this.identity = current;
-          this.cg.dropReadCaches();
-        }
-        return this.cg;
-      }
-      // The database was replaced (a re-index) or removed. Drop the stale
-      // handle; falling through re-opens against whatever is there now.
-      this.closeQuietly();
-    }
-
-    if (!isInitialized(this.projectRoot)) throw noIndexError(this.projectRoot);
+    // Replacement is legitimate for the index file, but never retain its old inode.
+    if (this.cg && !sameFile(this.identity, current)) this.closeQuietly();
+    if (!this.cg && !isInitialized(this.projectRoot)) throw noIndexError(this.projectRoot);
 
     try {
-      this.cg = CodeGraph.openSync(this.projectRoot);
+      if (!this.cg) {
+        this.cg = CodeGraph.openSync(this.projectRoot, { readOnly: true });
+        this.identity = current ?? identify(this.dbPath);
+      } else if (!sameContent(this.identity, current)) {
+        // External WAL commits invalidate the node LRU as well as SQL results.
+        this.identity = current;
+        this.cg.dropReadCaches();
+      }
+      // Recheck cached handles too: another writer can enter a bulk-load window.
+      this.cg.assertIndexReady();
+      return this.cg;
     } catch (err) {
-      this.cg = null;
-      this.identity = null;
+      this.closeQuietly();
       throw new ApiError(
         'index-unusable',
-        `The CodeGraph index for ${this.projectRoot} could not be opened: ` +
+        `The CodeGraph index for ${this.projectRoot} could not be read: ` +
           (err instanceof Error ? err.message : String(err)),
-        'If another CodeGraph process is rebuilding it, wait for that to finish. ' +
-          'If the index is damaged, rebuild it with "codegraph init".'
+        'The viewer never migrates or repairs an index. If another CodeGraph process is rebuilding it, wait for that to finish. ' +
+          'Otherwise explicitly rebuild outside the viewer with "codegraph index". Use a compatible/newer CodeGraph version for a newer schema.'
       );
     }
-    this.identity = current ?? identify(this.dbPath);
-    return this.cg;
   }
 
   /** Release the handle. Idempotent — the CLI calls it on Ctrl-C. */
