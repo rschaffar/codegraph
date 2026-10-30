@@ -4,8 +4,8 @@ import { defineWorkspace } from 'vitest/config';
 /**
  * Two projects, one command (`npm test` still runs everything).
  *
- * The UI package and Board shortcuts suites mount Svelte components against
- * mock adapters. They need three things the engine's suites must never see:
+ * The UI package, Board shortcuts and Board lifecycle suites mount Svelte
+ * components against mock adapters. They need three things the engine's suites must never see:
  *
  *   - the **Svelte plugin**, to compile `.svelte` and `.svelte.ts` modules;
  *   - **jsdom**, because a component without a document is not a render;
@@ -28,7 +28,7 @@ export default defineWorkspace([
     test: {
       name: 'engine',
       include: ['__tests__/**/*.test.ts'],
-      exclude: ['**/node_modules/**', '**/dist/**', '__tests__/ui-package.test.ts', '__tests__/ui-board-shortcuts.test.ts'],
+      exclude: ['**/node_modules/**', '**/dist/**', '__tests__/ui-package.test.ts', '__tests__/ui-board-shortcuts.test.ts', '__tests__/ui-board-canvas.test.ts'],
     },
   },
   {
@@ -46,7 +46,7 @@ export default defineWorkspace([
     test: {
       name: 'ui',
       globals: true,
-      include: ['__tests__/ui-package.test.ts', '__tests__/ui-board-shortcuts.test.ts'],
+      include: ['__tests__/ui-package.test.ts', '__tests__/ui-board-shortcuts.test.ts', '__tests__/ui-board-canvas.test.ts'],
       environment: 'jsdom',
       server: {
         deps: {
