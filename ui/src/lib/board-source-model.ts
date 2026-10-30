@@ -3,6 +3,7 @@ export { boardEvidenceUncertain };
 import type { Token } from './highlight';
 import { assignRefs, lastSegment, type LineRef } from './symbol-model';
 import type { WireSource } from './wire';
+import type { BoardExclusions, BoardFilters } from './board-wire';
 
 export const BOARD_SOURCE_PAGE_LINES = 400;
 export const BOARD_SOURCE_TARGET_PAGE = 8;
@@ -85,12 +86,30 @@ function inScope(id: string, symbol: BoardSymbol, byId: ReadonlyMap<string, Boar
   return false;
 }
 
+/** A loaded prefix (or a filtered/capped graph) cannot prove a unique token target. */
+export function boardSourceEvidenceComplete(input: {
+  total: number | null; nextOffset: number | null; bounded: boolean; loading: boolean; error?: string;
+  filters?: BoardFilters; excluded?: BoardExclusions | null;
+  targets: readonly { evidence: readonly BoardEvidence[]; total: number; nextOffset: number | null; loading?: boolean; error?: string }[];
+}): boolean {
+  if (input.loading || input.error || input.bounded || !Number.isSafeInteger(input.total) || input.total! < 0 ||
+    input.nextOffset !== null || input.targets.length !== input.total) return false;
+  const filters = input.filters;
+  const allIncluded = filters?.tests === true && filters.generated === true && filters.uncertain === true;
+  const counts = input.excluded?.relations;
+  if (!allIncluded && (!counts || counts.tests !== 0 || counts.generated !== 0 || counts.uncertain !== 0)) return false;
+  return input.targets.every((row) => !row.loading && !row.error && row.nextOffset === null &&
+    Number.isSafeInteger(row.total) && row.total >= 0 && row.evidence.length === row.total);
+}
+
 export interface BoardSourceRefsInput {
   expected: BoardSymbol;
   verified: BoardSymbol | null;
   source: WireSource | null;
   symbols: readonly BoardSymbol[];
   evidence: readonly BoardEvidence[];
+  /** Unknown/partial evidence must not establish exact inline links. */
+  evidenceComplete?: boolean;
   tokens: ReadonlyMap<number, readonly Token[]>;
 }
 
@@ -103,7 +122,7 @@ export interface BoardSourceRefsInput {
 export function boardSourceRefs(input: BoardSourceRefsInput): Map<number, LineRef[]> {
   const { expected, verified, source, symbols, evidence, tokens } = input;
   const out = new Map<number, LineRef[]>();
-  if (!verified || !boardSourceForIdentity(expected, verified, source) || !source?.lines?.length ||
+  if (input.evidenceComplete !== true || !verified || !boardSourceForIdentity(expected, verified, source) || !source?.lines?.length ||
     source.drift || source.showing !== 'indexed' || source.file !== verified.file) return out;
   const from = source.from ?? verified.line;
   const end = from + source.lines.length - 1;

@@ -9,7 +9,7 @@
   import type { BoardConnectionRequest, BoardExclusions } from '../../lib/board-wire';
   import {
     BOARD_SOURCE_TARGET_PAGE, BOARD_SOURCE_EVIDENCE_PAGE,
-    boardSourceRange, boardSourceContinuation, boardSourceRefs, boardSourceWithMembers,
+    boardSourceRange, boardSourceContinuation, boardSourceRefs, boardSourceWithMembers, boardSourceEvidenceComplete,
     boardSourceEvidenceTitle, boardEvidenceUncertain, verifiedBoardSourceSymbol, boardSourceForIdentity,
   } from '../../lib/board-source-model';
   import { live } from '../../lib/live.svelte';
@@ -168,7 +168,10 @@
   const block = $derived<CodeBlock>({ windows: source?.lines ? [{ start: source.from ?? verified?.line ?? 1, lines: source.lines }] : [], gapsAfter: [], tailGap: 0, whole: true });
   const tokens = $derived(tokensByLine(source?.lines ?? [], source?.from ?? verified?.line ?? 1, source?.highlight));
   const byId = $derived(new Map(symbols.map((item) => [item.id, item])));
-  const refs = $derived(indexed ? boardSourceRefs({ expected, verified, source, symbols, evidence: targets.flatMap((row) => row.evidence), tokens }) : new Map<number, LineRef[]>());
+  const evidenceComplete = $derived(boardSourceEvidenceComplete({ total: totalTargets, nextOffset: nextTargets,
+    bounded, loading: linksLoading, error: linksError, filters: visibility, excluded, targets }));
+  const refs = $derived(indexed ? boardSourceRefs({ expected, verified, source, symbols,
+    evidence: targets.flatMap((row) => row.evidence), evidenceComplete, tokens }) : new Map<number, LineRef[]>());
   const continuation = $derived(verified ? boardSourceContinuation(verified, source, current) : { previous: null, next: null });
   const owner = $derived(data.symbol.ownerId ? byId.get(data.symbol.ownerId) : undefined);
 
@@ -232,7 +235,8 @@
       {#if indexed}
         <details class="links">
           <summary>Indexed outgoing links · {targets.length}{totalTargets === null ? '' : ` of ${totalTargets}`} targets</summary>
-          <p>{boardSourceWithMembers(verified!) ? 'Symbol and contained members' : 'This symbol only'} · reading links does not add or restore board symbols. Inline links cover loaded evidence only.</p>
+          <p>{boardSourceWithMembers(verified!) ? 'Symbol and contained members' : 'This symbol only'} · reading links does not add or restore board symbols.</p>
+          {#if !evidenceComplete}<p class="dim">Inline target links are withheld until all unfiltered reference/evidence pages are proven complete and uncapped. Follow an explicit target below instead.</p>{/if}
           <p class="dim">Tests {data.filters?.tests ? 'included' : 'excluded'} · generated {data.filters?.generated ? 'included' : 'excluded'} · uncertain {data.filters?.uncertain ? 'included' : 'excluded'}</p>
           {#if excluded}<p class="dim">Filtered relationships · tests {excluded.relations.tests} · generated {excluded.relations.generated} · uncertain {excluded.relations.uncertain} (disjoint reasons)</p>{/if}
           {#if linksLoading}<p role="status">Loading indexed references…</p>{/if}
