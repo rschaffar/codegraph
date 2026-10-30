@@ -81,16 +81,29 @@ The review-board clickdummy remains available at `/board-prototype.html` on
 that viewer's URL. It is an isolated, session-only synthetic example, not a view
 of the indexed project. See [its design plan and development instructions](docs/design/review-board-plan.md#0-interaction-clickdummy-implemented-review-before-live-integration).
 
-`nix develop` provides Node.js, the native build toolchain and the archive tools
-used by the full test suite. For installed-package changes, rebuild with
-`nix build`; `npm run build` in a dev shell alone does not rebuild the native kernel.
+Run `nix develop` from the checkout root. It provides the package's Node.js,
+the native build toolchain, Git and the archive tools used by the full test suite.
+On first entry it recreates root and UI workspace `node_modules` offline from
+the package's locked Nix npm cache; repeat entry skips unchanged dependencies,
+and a missing workspace dependency tree is recreated. No copied worktree state,
+manual `npm install`, ambient npm cache or global npm configuration is needed.
+Temporary writable cache copies are removed after installation. A lock/cache
+mismatch fails with guidance to update `npmDepsHash`, rather than fetching from npm.
+Nix itself may fetch its pinned inputs/tool closure on first use; `nix develop
+--offline` works once those are cached.
+
+Build outputs are recreated with the commands below. For installed-package
+changes, rebuild with `nix build`; `npm run build` in a dev shell alone does not
+rebuild the native kernel. Project indexes are separately regenerated with
+`codegraph init`; saved boards/trails are user data, not build outputs.
 On a headless shell with `TERM=dumb`, run the terminal-glyph assertions with an
 explicit Unicode-capable test terminal:
 
 ```bash
+nix develop -c npm run build
 nix develop -c env TERM=xterm-256color npm test
-npm run check --workspace ui
-npm run build:lib
+nix develop -c npm run check --workspace ui
+nix develop -c npm run build:lib
 # Requires an existing managed browser and agent-browser; installs neither:
 CODEGRAPH_BROWSER_EXECUTABLE=/absolute/path/to/chromium node scripts/check-board-browser.mjs
 # To exercise the installed immutable Nix viewer instead of local dist:
@@ -115,7 +128,10 @@ read-only viewer to verify its HTML, JavaScript, indexed search and Board reads,
 in-memory identity resolution and metadata-write refusal. A second writable
 viewer saves, reopens and deletes a board in the throwaway fixture, checking that
 source and graph counts remain unchanged. These are packaging smoke tests, not
-the full test suite or browser interaction tests.
+the full test suite or browser interaction tests. A separate development-shell
+check starts without dependency trees and verifies offline bootstrap, idempotent
+re-entry, workspace recovery, manifest preservation and refusal of unrelated
+directories or mismatched locks.
 Linux ARM64 is exposed for native builds on that platform; exposing an output
 is not evidence that it has been built on every architecture.
 
