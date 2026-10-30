@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as http from 'http';
-import { createHash } from 'crypto';
+import { indexFingerprint } from './index-fingerprint';
 import CodeGraph from '../src/index';
 import { NODE_KINDS, EDGE_KINDS, type Node, type NodeKind, type EdgeKind } from '../src/types';
 import { createGraphApi, startUiServer, type GraphApi, type UiServerHandle } from '../src/ui-server';
@@ -19,7 +19,11 @@ let uncertainEvidenceIds: string[];
 let certainEvidenceIds: string[];
 let beforeFiles: string[];
 let beforeDb: string;
-const databaseHash = () => createHash('sha256').update(fs.readFileSync(path.join(root, '.codegraph/codegraph.db'))).digest('hex');
+const databaseHash = () => {
+  const reader = DatabaseConnection.open(getDatabasePath(root), { readOnly: true });
+  try { return indexFingerprint(reader.getDb(), getDatabasePath(root)).logical; }
+  finally { reader.close(); }
+};
 const metadataFiles = () => fs.readdirSync(path.join(root, '.codegraph')).filter(file => !/-wal$|-shm$/.test(file)).sort();
 
 function request(endpoint: string, params: Record<string, string | number> = {}, method = 'GET'): Promise<{ status: number; body: any }> {

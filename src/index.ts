@@ -583,6 +583,13 @@ export class CodeGraph {
     return new CodeGraph(db, queries, resolvedRoot);
   }
 
+  /** Require a compatible, complete index without migrating or repairing it.
+   * Explicitly opt-in: ordinary concurrent read-only library/MCP opens remain permissive.
+   */
+  assertIndexReady(): void {
+    this.db.assertIndexReady();
+  }
+
   /**
    * Rebuild, on a worker thread, the secondary indexes an interrupted bulk
    * load dropped and `openSync({ deferIndexRecovery: true })` left (#1887).

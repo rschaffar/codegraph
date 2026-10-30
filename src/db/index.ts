@@ -612,6 +612,36 @@ export class DatabaseConnection {
     }
   }
 
+  /** Strict, SELECT-only readiness check for viewers; ordinary concurrent readers
+   * intentionally remain permissive while a writer rebuilds or migrates.
+   */
+  assertIndexReady(): void {
+    this.transaction(() => {
+      const version = getCurrentVersion(this.db);
+      if (version !== CURRENT_SCHEMA_VERSION) {
+        throw new Error(`Index schema ${version} is incompatible with this viewer (requires ${CURRENT_SCHEMA_VERSION}).`);
+      }
+      const indexes = [...new Set<string>([
+        ...DatabaseConnection.BULK_PARSE_INDEX_NAMES,
+        ...DatabaseConnection.BULK_REF_INDEX_NAMES,
+        ...DatabaseConnection.BULK_EDGE_INDEX_NAMES,
+      ])];
+      const found = this.db.prepare(`SELECT name FROM sqlite_master WHERE type='index' AND name IN (${indexes.map(() => '?').join(',')})`)
+        .all(...indexes) as { name: string }[];
+      const present = new Set(found.map((row) => row.name));
+      const missing = indexes.filter((name) => !present.has(name));
+      if (missing.length) throw new Error(`Index rebuild/repair is incomplete: missing ${missing.join(', ')}.`);
+      const names = DatabaseConnection.FTS_TRIGGER_NAMES;
+      const fts = this.db.prepare(`SELECT
+        EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='nodes_fts') AS present,
+        (SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name IN (${names.map(() => '?').join(',')})) AS triggers`)
+        .get(...names) as { present: number; triggers: number };
+      if (fts.present && fts.triggers !== names.length) {
+        throw new Error('Index rebuild/repair is incomplete: FTS maintenance triggers are missing.');
+      }
+    });
+  }
+
   /**
    * Get the underlying database instance
    */
