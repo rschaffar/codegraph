@@ -4,6 +4,7 @@
 const assert = require('node:assert/strict');
 const { execFileSync, spawn } = require('node:child_process');
 const { once } = require('node:events');
+const { createHash } = require('node:crypto');
 const fs = require('node:fs');
 const net = require('node:net');
 const os = require('node:os');
@@ -15,6 +16,26 @@ const packageRoot = path.join(output, 'lib/codegraph');
 const executable = path.join(output, 'bin/codegraph');
 const { getKernel, kernelSupports } = require(path.join(packageRoot, 'dist/extraction/kernel/loader.js'));
 const { decodeExtractBuffers } = require(path.join(packageRoot, 'dist/extraction/kernel/decode.js'));
+const { CodeGraph } = require(path.join(packageRoot, 'dist/index.js'));
+
+function auditIndex(project) {
+  const cg = CodeGraph.openSync(project, { readOnly: true });
+  const db = cg.db.getDb();
+  const hash = value => createHash('sha256').update(value).digest('hex');
+  const fingerprint = () => {
+    const logical = db.transaction(() => {
+      const schema = db.prepare('SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name').all();
+      const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all();
+      const rows = tables.map(({ name }) => [name, db.prepare(`SELECT * FROM "${name.replace(/"/g, '""')}"`).all()
+        .map(row => JSON.stringify(row, (_, value) => typeof value === 'bigint' ? String(value) : value)).sort()]);
+      return hash(JSON.stringify({ schema, rows }));
+    })();
+    const bytes = file => { try { return hash(fs.readFileSync(file)); } catch (error) { if (error.code === 'ENOENT') return null; throw error; } };
+    return { logical, main: bytes(cg.db.getPath()), wal: bytes(`${cg.db.getPath()}-wal`) };
+  };
+  const before = fingerprint();
+  return () => { try { assert.deepEqual(fingerprint(), before, 'viewer must not alter logical graph/schema/main/WAL bytes'); } finally { cg.close(); } };
+}
 
 function run(args, cwd, env = {}) {
   return execFileSync(executable, args, {
@@ -47,6 +68,14 @@ async function main() {
   console.log('native addon: loaded, contract verified, TypeScript extraction decoded');
 
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-nix-'));
+  const runtimeReport = path.join(workspace, 'runtime.json');
+  const runtimeProbe = path.join(workspace, 'runtime.cjs');
+  fs.writeFileSync(runtimeProbe, `require('node:fs').writeFileSync(${JSON.stringify(runtimeReport)}, JSON.stringify({ executable: process.execPath, versions: process.versions }));`);
+  run(['--version'], workspace, { NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require=${runtimeProbe}`.trim() });
+  const runtime = JSON.parse(fs.readFileSync(runtimeReport, 'utf8'));
+  assert.equal(fs.realpathSync(runtime.executable), fs.realpathSync(process.argv[3]), 'installed wrapper must use the selected Nix runtime');
+  assert.equal(Number(runtime.versions.node.split('.')[0]), 24, 'installed Nix runtime must remain supported Node 24');
+  console.log(`installed runtime: Node ${runtime.versions.node}, OpenSSL ${runtime.versions.openssl}, selected executable verified`);
   let nativeFixture;
   for (const mode of ['native', 'wasm']) {
     const fixture = path.join(workspace, mode);
@@ -61,6 +90,7 @@ async function main() {
     console.log(`${mode} CLI: init, query and explore passed`);
   }
 
+  const checkReadOnlyIndex = auditIndex(nativeFixture);
   const port = await unusedPort();
   const base = `http://127.0.0.1:${port}`;
   const server = spawn(executable, ['ui', nativeFixture, '--read-only', '--no-open', '--port', String(port)], {
@@ -105,7 +135,9 @@ async function main() {
 
     const selected = await (await fetch(`${base}/api/board/search?q=hello&kind=function`)).json();
     const id = selected.items.find((item) => item.name === 'hello').id;
-    const board = await (await fetch(`${base}/api/board?ids=${encodeURIComponent(JSON.stringify([id]))}`)).json();
+    const boardResponse = await fetch(`${base}/api/board`, { method: 'POST', headers: { 'content-type': 'application/json', 'X-CodeGraph-UI': '1' }, body: JSON.stringify({ ids: [id] }) });
+    assert.equal(boardResponse.status, 200);
+    const board = await boardResponse.json();
     assert.deepEqual(board.included, [id]);
     assert.ok(board.symbols.some((item) => item.id === id));
     const boards = await (await fetch(`${base}/api/boards`)).json();
@@ -134,9 +166,11 @@ async function main() {
       await exited;
     } finally {
       clearTimeout(killTimer);
+      checkReadOnlyIndex();
     }
   }
 
+  const checkWritableIndex = auditIndex(nativeFixture);
   const writePort = await unusedPort();
   const writeBase = `http://127.0.0.1:${writePort}`;
   const writable = spawn(executable, ['ui', nativeFixture, '--no-open', '--port', String(writePort)], {
@@ -154,7 +188,6 @@ async function main() {
       await delay(100);
     }
     assert.ok(ready, `writable viewer not ready: ${writeLogs}`);
-    const before = await (await fetch(`${writeBase}/api/stats`)).json();
     const search = await (await fetch(`${writeBase}/api/board/search?q=hello&kind=function`)).json();
     const hello = search.items.find((item) => item.name === 'hello');
     assert.ok(hello);
@@ -178,14 +211,11 @@ async function main() {
     assert.equal(deleted.status, 200);
     assert.equal(fs.existsSync(path.join(nativeFixture, '.codegraph/ui/boards', `${saved.id}.json`)), false);
     assert.equal(fs.readFileSync(path.join(nativeFixture, 'hello.ts'), 'utf8'), source);
-    const after = await (await fetch(`${writeBase}/api/stats`)).json();
-    assert.equal(after.graph.nodes, before.graph.nodes);
-    assert.equal(after.graph.edges, before.graph.edges);
-    console.log('live board: writable installed Save/Open/Delete persists metadata only; source and graph counts unchanged');
+    console.log('live board: writable installed Save/Open/Delete persists metadata only; source unchanged');
   } finally {
     writable.kill('SIGTERM');
     const killTimer = setTimeout(() => writable.kill('SIGKILL'), 5_000);
-    try { await writeExited; } finally { clearTimeout(killTimer); }
+    try { await writeExited; } finally { clearTimeout(killTimer); checkWritableIndex(); }
   }
 }
 
