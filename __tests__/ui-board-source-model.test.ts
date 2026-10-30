@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   BOARD_SOURCE_PAGE_LINES, boardSourceRange, boardSourceContinuation, boardSourceWithMembers,
-  boardSourceForIdentity, boardSourceRefs, boardSourceEvidenceTitle, verifiedBoardSourceSymbol,
+  boardSourceForIdentity, boardSourceRefs, boardSourceEvidenceTitle, verifiedBoardSourceSymbol, boardSourceEvidenceComplete,
 } from '../ui/src/lib/board-source-model';
 import type { BoardEvidence, BoardSymbol } from '../ui/src/lib/board-model';
 import { tokensByLine, type Token } from '../ui/src/lib/highlight';
@@ -20,9 +20,9 @@ function evidence(overrides: Partial<BoardEvidence> = {}): BoardEvidence {
   return { id: 'edge:one', source: member.id, target: target.id, kind: 'calls', file: owner.file, line: 12, col: 2, ...overrides };
 }
 function refs(edges: BoardEvidence[] = [evidence()], slice = source(), overrides: {
-  expected?: BoardSymbol; verified?: BoardSymbol | null; symbols?: BoardSymbol[]; tokens?: Map<number, Token[]>;
+  expected?: BoardSymbol; verified?: BoardSymbol | null; symbols?: BoardSymbol[]; tokens?: Map<number, Token[]>; evidenceComplete?: boolean;
 } = {}) {
-  return boardSourceRefs({ expected: owner, verified: owner, source: slice, symbols: [owner, member, target, other],
+  return boardSourceRefs({ expected: owner, verified: owner, source: slice, symbols: [owner, member, target, other], evidenceComplete: true,
     evidence: edges, tokens: tokensByLine(slice.lines ?? [], slice.from ?? 1, slice.highlight), ...overrides });
 }
 
@@ -82,6 +82,26 @@ describe('Board source identity and bounded reading', () => {
 });
 
 describe('Board source references use original indexed evidence', () => {
+  it('requires every target/evidence page and no unknown filtered or capped candidates', () => {
+    const row = { evidence: [evidence()], total: 1, nextOffset: null };
+    const page = { total: 1, nextOffset: null, bounded: false, loading: false, targets: [row],
+      excluded: { symbols: { tests: 0, generated: 0, uncertain: 0 }, relations: { tests: 0, generated: 0, uncertain: 0 } } };
+    expect(boardSourceEvidenceComplete(page)).toBe(true);
+    for (const change of [{ total: null }, { total: 2 }, { nextOffset: 1 }, { bounded: true }, { loading: true },
+      { error: 'failed' }, { excluded: null }, { targets: [{ ...row, total: 2 }] }, { targets: [{ ...row, nextOffset: 1 }] },
+      { targets: [{ ...row, loading: true }] }, { targets: [{ ...row, error: 'failed' }] },
+      { excluded: { ...page.excluded, relations: { tests: 0, generated: 0, uncertain: 1 } } }]) {
+      expect(boardSourceEvidenceComplete({ ...page, ...change }), JSON.stringify(change)).toBe(false);
+    }
+    expect(boardSourceEvidenceComplete({ ...page, excluded: null, filters: { tests: true, generated: true, uncertain: true } })).toBe(true);
+  });
+
+  it('does not infer unique targets from incomplete or unknown evidence', () => {
+    expect(refs([evidence()], source(), { evidenceComplete: false }).size).toBe(0);
+    expect(refs([evidence()], source(), { evidenceComplete: undefined }).size).toBe(0);
+    expect(refs([evidence()], source(), { evidenceComplete: true }).size).toBe(1);
+  });
+
   it('reuses SourceBlock matching and preserves the original expression column', () => {
     const found = refs().get(12)!;
     expect(found).toHaveLength(1);

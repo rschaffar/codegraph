@@ -25,6 +25,7 @@ const symbol: BoardSymbol & WireNodeRef = {
 const target: BoardSymbol & WireNodeRef = { ...symbol, id: 'method:render', kind: 'method', name: 'render', qualifiedName: 'Renderer.render', file: 'src/renderer.ts', line: 2, endLine: 4 };
 const second: BoardSymbol & WireNodeRef = { ...target, id: 'method:other', name: 'other', qualifiedName: 'Renderer.other' };
 const edge: BoardEvidence = { id: 'edge:1', source: symbol.id, target: target.id, kind: 'references', file: symbol.file, line: 2, col: 0, confidence: 1 };
+const noExclusions = { symbols: { tests: 0, generated: 0, uncertain: 0 }, relations: { tests: 0, generated: 0, uncertain: 0 } };
 const list = <T,>(items: T[] = []) => ({ total: items.length, shown: items.length, truncated: false, items });
 const header: WireSymbolPayload = {
   node: { ...symbol, startColumn: 0, endColumn: 1, lines: 850 }, ancestors: [], members: list(), hierarchy: null,
@@ -51,7 +52,7 @@ function makeAdapter() {
     boardConnections: vi.fn(async (request: BoardConnectionRequest) => ({
       scope: symbol, direction: 'outgoing', withMembers: request.members, symbols: [symbol, target, second], total: 2,
       items: request.offset ? [{ target: second, evidence: [{ ...edge, id: 'edge:3', target: second.id, kind: 'contains' }], total: 1 }] : [{ target, evidence: [edge], total: 2 }],
-      nextOffset: request.offset ? null : 1, bounded: true, notes: ['Evidence is paged.'],
+      nextOffset: request.offset ? null : 1, bounded: true, notes: ['Evidence is paged.'], excluded: noExclusions,
     })),
     boardEvidence: vi.fn(async () => ({ symbols: [symbol, target], items: [{ ...edge, id: 'edge:2', line: 450, provenance: 'heuristic', registeredAt: 'src/wiring.ts:20' }], total: 2, nextOffset: null, bounded: false, notes: [] })),
     file: vi.fn(async () => file), fileCode: vi.fn(async () => fileCode),
@@ -158,7 +159,10 @@ describe('linked source cards', () => {
     values.set('data', { ...values.get('data')!, resize: vi.fn(), read: vi.fn() }); await settle();
     expect([adapter.calls.nodes.mock.calls.length, adapter.calls.source.mock.calls.length, adapter.calls.boardConnections.mock.calls.length]).toEqual(counts);
   });
-  it('loads bounded indexed links, follows another card, and never changes graph membership', async () => {
+  it('links complete unambiguous evidence, follows another card, and never changes graph membership', async () => {
+    adapter.calls.boardConnections.mockResolvedValue({ scope: symbol, direction: 'outgoing', withMembers: true,
+      symbols: [symbol, target], items: [{ target, evidence: [edge], total: 1 }], total: 1, nextOffset: null,
+      bounded: false, notes: [], excluded: noExclusions });
     const follow = vi.fn(); renderCard({ follow }); renderCard({}, 'card:two'); await settle();
     expect(host.querySelectorAll('[data-code-card]')).toHaveLength(2);
     expect(adapter.calls.boardConnections.mock.calls[0][0]).toMatchObject({ id: symbol.id, direction: 'outgoing', members: true, tests: false, generated: false, uncertain: false, limit: 8 });
@@ -170,6 +174,35 @@ describe('linked source cards', () => {
     expect(host.querySelectorAll('[data-code-card]')).toHaveLength(2);
     expect(adapter.calls.board).not.toHaveBeenCalled(); expect(boardRequests.pending).toEqual([]);
     expect(host.querySelectorAll('.source [role="link"]')).toHaveLength(2);
+  });
+
+  it('never links a same-site target that is ambiguous on a later target page', async () => {
+    const peers = Array.from({ length: 9 }, (_, index) => ({ ...target, id: `method:peer${index}`,
+      name: index === 0 || index === 8 ? 'render' : `other${index}`, qualifiedName: index === 0 ? 'A.render' : index === 8 ? 'Z.render' : `Peer.other${index}` }));
+    adapter.calls.boardConnections.mockImplementation(async (request) => {
+      const page = request.offset ? peers.slice(8) : peers.slice(0, 8);
+      return { scope: symbol, direction: 'outgoing', withMembers: true, symbols: [symbol, ...page],
+        items: page.map((target) => ({ target, evidence: [{ ...edge, id: `edge:${target.id}`, target: target.id }], total: 1 })),
+        total: 9, nextOffset: request.offset ? null : 8, bounded: false, notes: [], excluded: noExclusions };
+    });
+    const follow = vi.fn(); renderCard({ follow }); await settle();
+    expect(host.querySelector('.source [role="link"]')).toBeNull();
+    expect(host.textContent).toContain('Inline target links are withheld');
+    host.querySelector<HTMLButtonElement>('.target-link')!.click();
+    expect(follow).toHaveBeenCalledWith(expect.objectContaining({ id: peers[0].id }), undefined);
+    button('Load more targets (8 of 9)').click(); await settle();
+    expect(host.querySelector('.source [role="link"]')).toBeNull();
+    expect(host.textContent).toContain('Z.render');
+    expect(adapter.calls.board).not.toHaveBeenCalled();
+  });
+
+  it('does not treat filtered-out evidence as proof of a unique inline target', async () => {
+    adapter.calls.boardConnections.mockResolvedValue({ scope: symbol, direction: 'outgoing', withMembers: true,
+      symbols: [symbol, target], items: [{ target, evidence: [edge], total: 1 }], total: 1, nextOffset: null,
+      bounded: false, notes: [], excluded: { ...noExclusions, relations: { tests: 0, generated: 0, uncertain: 1 } } });
+    renderCard(); await settle();
+    expect(host.querySelector('.source [role="link"]')).toBeNull();
+    expect(host.querySelector('.target-link')?.textContent).toContain('Renderer.render');
   });
 
   it('pages target discovery and evidence only on explicit Load more, retaining raw kind metadata', async () => {
