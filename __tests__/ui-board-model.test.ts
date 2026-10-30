@@ -254,6 +254,30 @@ describe('recursive review board presentation', () => {
     expect(hiddenPin.edges).toEqual([]);
   });
 
+  it('restores an exact hidden inline identity even when contains ownership is ambiguous', () => {
+    const model = createBoardModel([node('first'), node('second'), node('shared'), node('peer')], [
+      edge('a', 'first', 'shared', { kind: 'contains' }), edge('b', 'second', 'shared', { kind: 'contains' }),
+      edge('call', 'shared', 'peer'),
+    ]);
+    const included = ['first']; const hidden = ['shared'];
+    const outline = model.projectBoard(included, hidden, ['first']).symbols[0]!;
+    expect(outline.memberRows[0]).toMatchObject({ symbol: { id: 'shared' }, hidden: true, pinned: false, ownershipProven: false });
+    expect(model.targetState('shared', included, hidden)).toEqual({ status: 'hidden', representative: 'shared' });
+    expect(model.browseConnections('peer', 'incoming', false, included, hidden)[0])
+      .toMatchObject({ target: { id: 'shared' }, status: 'hidden', representative: 'shared' });
+    const restored = model.projectBoard(included, [], ['first']);
+    expect(restored.symbols.map((item) => item.symbol.id)).toEqual(['first']);
+    expect(restored.symbols[0]!.memberRows[0]).toMatchObject({ hidden: false, pinned: false });
+    expect(model.representative('shared', included, [])).toBeNull();
+    expect(included).toEqual(['first']);
+  });
+
+  it('does not turn an unrelated hidden ancestor into board membership', () => {
+    const model = nested();
+    expect(model.targetState('parameter', ['peer'], ['nested'])).toEqual({ status: 'absent', representative: 'parameter' });
+    expect(model.browseConnections('peer', 'incoming', false, ['peer'], ['nested'])[0]).toMatchObject({ status: 'absent' });
+  });
+
   it('supports explicit contains membership without asserting ambiguous ownership', () => {
     const symbols = [node('first'), node('second'), node('shared')];
     const model = createBoardModel(symbols, [edge('a', 'first', 'shared', { kind: 'contains' }), edge('b', 'second', 'shared', { kind: 'contains' }),
