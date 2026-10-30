@@ -156,13 +156,20 @@ export function createBoardModel(symbols: readonly BoardSymbol[], relations: rea
     }
     return null;
   }
+  /** Exact hidden identities remain restorable even without a proven owner. */
+  function classifyTarget(id: string, visible: (id: string) => string | null, prior: (id: string) => string | null,
+    hidden: ReadonlySet<string>): Pick<ConnectionRow, 'status' | 'representative'> {
+    const current = visible(id);
+    if (current) return { status: 'visible', representative: current };
+    if (hidden.has(id)) return { status: 'hidden', representative: id };
+    const previous = prior(id);
+    if (!previous) return { status: 'absent', representative: id };
+    return { status: 'hidden', representative: hiddenBranch(id, hidden) ?? previous };
+  }
   /** For Hidden, representative is the exact Restore anchor, which need not be pinned. */
   function targetState(id: string, included: readonly string[], hidden: readonly string[]): Pick<ConnectionRow, 'status' | 'representative'> {
-    const visible = representative(id, included, hidden);
-    if (visible) return { status: 'visible', representative: visible };
-    const prior = representative(id, included, []);
-    if (!prior) return { status: 'absent', representative: id };
-    return { status: 'hidden', representative: hiddenBranch(id, new Set(hidden)) ?? prior };
+    const chosen = new Set(included); const invisible = new Set(hidden);
+    return classifyTarget(id, resolver(chosen, invisible), resolver(chosen, new Set()), invisible);
   }
   function includeSymbols(included: readonly string[], hidden: readonly string[], ids: readonly string[]) {
     const valid = new Set(ids.filter((id) => byId.has(id)));
@@ -181,11 +188,9 @@ export function createBoardModel(symbols: readonly BoardSymbol[], relations: rea
     }
     const visible = resolver(chosen, invisible); const prior = resolver(chosen, new Set());
     const needle = query.trim().toLowerCase();
-    return [...grouped].map(([peer, evidence]) => {
-      const current = visible(peer); const previous = current ?? prior(peer);
-      return { target: symbol(peer), evidence, status: current ? 'visible' as const : previous ? 'hidden' as const : 'absent' as const,
-        representative: current ?? (previous ? hiddenBranch(peer, invisible) ?? previous : peer) };
-    }).filter(({ target, evidence }) => !needle || `${target.qualifiedName} ${target.kind} ${target.file} ${evidence.map((edge) => edge.kind).join(' ')}`.toLowerCase().includes(needle))
+    return [...grouped].map(([peer, evidence]) => ({ target: symbol(peer), evidence,
+      ...classifyTarget(peer, visible, prior, invisible),
+    })).filter(({ target, evidence }) => !needle || `${target.qualifiedName} ${target.kind} ${target.file} ${evidence.map((edge) => edge.kind).join(' ')}`.toLowerCase().includes(needle))
       .sort((a, b) => (a.target.ownerId ?? a.target.file).localeCompare(b.target.ownerId ?? b.target.file) || sourceOrder(a.target, b.target));
   }
   /** Exact loaded ownership path, including representative and endpoint, or no proven path. */
