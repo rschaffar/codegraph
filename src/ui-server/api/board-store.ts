@@ -82,6 +82,14 @@ function text(value: unknown, max: number, label: string): string {
   }
   return value;
 }
+/** Extraction preserves signature whitespace; it is exact identity, not display text. */
+function boardSignature(value: unknown): string {
+  // eslint-disable-next-line no-control-regex -- allow only HT/LF/CR among control bytes
+  if (typeof value !== 'string' || value.trim() === '' || value.length > 4096 || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(value)) {
+    throw badRequest('Invalid board signature (nonempty, max 4096 characters; only tabs and line breaks may be controls).');
+  }
+  return value;
+}
 function number(value: unknown, min: number, max: number): number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) {
     throw badRequest(`Board geometry must be finite and between ${min} and ${max}.`);
@@ -122,7 +130,7 @@ function identity(value: unknown): BoardIdentity {
     qualifiedName: text(v.qualifiedName, 2048, 'qualified name'),
     kind: text(v.kind, 128, 'kind'),
     file: parseBoardFile(v.file),
-    ...(v.signature === undefined ? {} : { signature: text(v.signature, 4096, 'signature') }),
+    ...(v.signature === undefined ? {} : { signature: boardSignature(v.signature) }),
   };
 }
 

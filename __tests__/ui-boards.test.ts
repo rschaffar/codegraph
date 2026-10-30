@@ -42,6 +42,7 @@ beforeAll(async () => {
   fs.mkdirSync(path.join(indexRoot, 'src'), { recursive: true });
   fs.writeFileSync(path.join(indexRoot, 'src/a.ts'), alphaSource);
   fs.writeFileSync(path.join(indexRoot, 'src/context.ts'), 'export const contextFixture = 1;\n');
+  fs.writeFileSync(path.join(indexRoot, 'src/multiline.ts'), 'export function multiline(\n\tvalue: string\r\n): string {\n  return value;\n}\n');
   fs.writeFileSync(path.join(indexRoot, 'src/overloads.ts'), [
     'export function duplicate(x: string): string;',
     'export function duplicate(x: number): number;',
@@ -119,6 +120,35 @@ function contextDocument(): BoardDocument {
 }
 
 describe('board import validation without storage', () => {
+  it.each([true, false])('round-trips extracted multiline signatures for included=%s identities', (included) => {
+    const node = cg.getNodesByQualifiedName('multiline')[0]!;
+    expect(node.signature).toContain('\n');
+    const doc = document();
+    doc.symbols[0]!.included = included;
+    doc.symbols[0]!.identity = { id: node.id, qualifiedName: node.qualifiedName, kind: node.kind, file: node.filePath, signature: node.signature };
+    expect(parseBoardDocument(JSON.parse(JSON.stringify(doc)))).toEqual(doc);
+    const saved = save('Multiline', doc);
+    expect(readStoredBoard(root, saved.id)!.document).toEqual(doc);
+    expect(resolveBoard(cg, doc).resolutions[0]).toMatchObject({ status: 'ok', node: { id: node.id, signature: node.signature } });
+    const normalized = structuredClone(doc); normalized.symbols[0]!.identity.signature = node.signature!.replace(/\s+/g, ' ');
+    expect(resolveBoard(cg, normalized).resolutions[0]).toMatchObject({ status: 'missing', node: null });
+  });
+
+  it('allows bounded signature whitespace without relaxing any other identity field', () => {
+    for (const signature of ['(\n  value: string\n): string', '(\r\n\tvalue: string\r\n): string', 's'.repeat(4096)]) {
+      const doc = document(); doc.symbols[0]!.identity.signature = signature;
+      expect(parseBoardDocument(doc).symbols[0]!.identity.signature).toBe(signature);
+    }
+    for (const signature of ['', ' \t\r\n', 's'.repeat(4097), ...Array.from({ length: 33 }, (_, index) => index < 32 ? index : 127)
+      .filter((code) => ![9, 10, 13].includes(code)).map((code) => `value${String.fromCharCode(code)}`)]) {
+      const doc = document(); doc.symbols[0]!.identity.signature = signature;
+      expect(() => parseBoardDocument(doc)).toThrow();
+    }
+    for (const field of ['id', 'qualifiedName', 'kind', 'file'] as const) {
+      const doc = document(); doc.symbols[0]!.identity[field] = 'bad\nfield';
+      expect(() => parseBoardDocument(doc), field).toThrow();
+    }
+  });
   it('round-trips the concrete document, including future kinds and hidden layout', () => {
     const doc = document();
     doc.symbols[0]!.identity.kind = 'future_kind';
