@@ -127,7 +127,13 @@ exercise CLI indexing/querying with native and WASM extraction, and start the
 read-only viewer to verify its HTML, JavaScript, indexed search and Board reads,
 in-memory identity resolution and metadata-write refusal. A second writable
 viewer saves, reopens and deletes a board in the throwaway fixture, checking that
-source and graph counts remain unchanged. These are packaging smoke tests, not
+source, logical graph contents/schema and database/WAL bytes remain unchanged.
+The installed wrapper's actual Node executable and runtime versions are checked
+against the selected Nix runtime, not inferred from the app's version string.
+This proves runtime selection, not complete security-backport coverage: the current
+lock selects Node 24.21.0 while the bundle's minimum is 24.22.1, and that policy
+mismatch remains unverified rather than being labelled a proven vulnerability.
+These are packaging smoke tests, not
 the full test suite or browser interaction tests. A separate development-shell
 check starts without dependency trees and verifies offline bootstrap, idempotent
 re-entry, workspace recovery, manifest preservation and refusal of unrelated

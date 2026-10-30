@@ -1,10 +1,11 @@
 # Local Review Board: design and implementation plan
 
-Status: the agreed **single-project Review Board V1 is implemented**. Selection,
-filters, recursive members, linked source cards, reader shortcuts and metadata
-persistence are integrated, with API/model/component, browser, real-review and
-source-built Nix validation. Platform and size qualifications are recorded below;
-this remains a local experimental feature, not a cross-platform release claim.
+Status: the agreed **single-project Review Board V1 is implemented**, and the
+reviewer-reproduced functional defects have local fixes and regression coverage.
+Selection, filters, recursive members, linked source cards, reader shortcuts and
+metadata persistence are integrated. Validation and outstanding hardening/runtime
+qualifications are recorded below; this remains a local experimental feature,
+not a declaration that every review finding or platform is acceptance-complete.
 
 This is a deliberate local extension of `codegraph ui`, not a replacement for
 Map, Symbol, Flow, Screens or Steps. The source-built Nix package carries the
@@ -314,6 +315,54 @@ and native screen-reader sessions have not been exercised; automated accessible
 labels/keyboard/focus and Svelte diagnostics are not substitutes for those claims.
 Cross-project boards and the deliberately deferred items below remain out of V1.
 
+## Reviewer follow-up and remaining qualifications
+
+The local fixes separate metadata permission from graph permission: every viewer
+connection opens SQLite read-only, including normal metadata-saving mode. A
+SELECT-only readiness check refuses incompatible schemas and interrupted bulk-load
+states, without migrating or repairing them; ordinary concurrent library/MCP
+readers keep their existing permissive contract. Logical contents/schema and live
+WAL bytes are covered independently of main-file hashing or graph counts.
+
+Board projection uses a marker-gated, byte-bounded JSON POST so long valid
+selections do not exceed HTTP header limits; GET/HEAD remain compatible. Signature
+identity preserves bounded tabs and line breaks exactly. Exact hidden inline
+identities restore without requiring a guessed owner or becoming independent pins.
+Source-token links wait for complete, uncapped evidence without unknown exclusions;
+explicit targets remain navigable while pages are incomplete.
+
+Save/Delete ordering and matching Open/refresh invalidation prevent stale saved
+bindings. Refresh preserves in-flight Save/Save-as receipts. Completed Connections
+criteria/results are atomic; Back restores the completed context and keeps text
+drafts separate, refetching entries that never completed. New/replacement reset
+clears recipe/discovery caches and stale continuations, exclusions replace rather
+than merge, and unavailable evidence paging is disabled and explained.
+
+Mounted regressions compare identities rather than generated keys, including moved,
+missing and ambiguous resolutions, source-only cards, positions, visibility,
+member limits, source dimensions/collapse/z-order and viewport. The generic browser
+walkthrough also checks real pointer drag/pan, trusted native wheel zoom, resized
+and collapsed card round-trips, and focus after restoring the final hidden row.
+Installed-package checks compare logical schema/content and DB/WAL bytes in both
+metadata modes and verify the wrapper's actual selected Node executable/version.
+The post-review x86_64-linux run passed 9,017 tests with 416 skips,
+zero Svelte errors/warnings, the pruned reusable-library build, offline source-built
+Nix package/flake checks, and the complete installed-package browser walkthrough.
+
+Remaining qualifications are explicit, not claimed fixed:
+
+- Concurrent local directory replacement can still race pathname-based board
+  storage; leaf no-follow checks and atomic publication do not pin ancestors.
+  Browser actions/imports alone cannot perform that replacement, and the default
+  private single-user deployment limits the practical threat. Descriptor-capability
+  storage and a changed-project-root authority policy remain deferred; no Linux-only
+  persistence restriction was introduced. Hostile shared-filesystem use is not claimed.
+- The locked Nix runtime is Node 24.21.0 (observed OpenSSL 3.5.9), while the
+  bundle's version floor is 24.22.1. Complete security-backport coverage is unverified;
+  a version mismatch is not proof of vulnerability. Runtime selection is now tested,
+  but no unsupported security claim, source download or runtime repin was made.
+- Windows/ARM64 runtime and native screen-reader qualifications still apply.
+
 ## Implementation sequence
 
 ### 0. Interaction clickdummy (implemented; review before live integration)
@@ -329,7 +378,7 @@ Open `/board-prototype.html` on the source-built viewer server. For development
 without any project index:
 
 ```bash
-nix develop -c npm ci --ignore-scripts
+# The dev shell prepares the locked root/UI npm dependencies offline.
 nix develop -c bash -c 'cd ui && node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 5176 --strictPort'
 # Open http://127.0.0.1:5176/board-prototype.html
 ```

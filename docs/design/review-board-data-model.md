@@ -116,6 +116,10 @@ presentation; preserve ambiguity instead of claiming a runtime target is known.
   target in Connections and a named Hidden items list and offers **Undo hide**.
   Hidden pinned members also appear marked Hidden with Restore in their owner's
   outline, not as ordinary rows whose edges inexplicably disappeared.
+- Connections Back restores completed criteria and their matching result page,
+  not pending controls alongside older results; unsubmitted text remains a draft.
+  A history entry without completed results is re-fetched. Evidence/paging always
+  use that completed context rather than current unsubmitted controls.
 - Locate highlights/fits the existing representative and can reveal a folded
   member without adding a duplicate. Adding/locating a symbol does not silently
   remove active relation filters; explain filtered/hidden edges.
@@ -145,6 +149,12 @@ re-seed an excluded branch merely because a child was expanded before saving.
 Member reveal limits are persisted and capped consistently at 2,048; paged
 Connections remains available beyond that outline bound. Preserve start columns
 as well as lines for same-line declaration ordering.
+
+Inline source-token links require explicitly proven complete, uncapped evidence;
+a loaded prefix cannot establish a unique target, and unknown filtered candidates
+must not become guessed links. Explicit target/evidence browsing remains available
+while inline precision is withheld. Signature whitespace is exact identity: bounded
+tabs/CR/LF are preserved, not normalized to make a match.
 
 Source-card selection is presentation decoration, derived from original endpoint
 IDs and their proven representatives. It does not select additional indexed nodes

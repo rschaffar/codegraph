@@ -125,6 +125,10 @@ These describe `codegraph ui` and its screens. They were taken out of `## [Unrel
 
 ## Fixes
 
+- The viewer now opens its index read-only even when saving arrangements is allowed, and explains when an incompatible or incomplete index needs attention outside the viewer.
+- Review Board restores exact hidden members and multiline identities, starts New with fresh state, and keeps saved arrangements and Connections history coherent during concurrent requests.
+- Review Board handles long selections without oversized URLs and withholds precise source-token links until the available evidence can actually establish a unique target.
+
 - Steps diagrams retain database operations made through external client chains without inventing internal dependencies.
 
 ## Fixes — Screens, links and navigation
