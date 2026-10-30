@@ -62,7 +62,10 @@
   let searchSelection = $state<string[]>([]);
   let searchBusy = $state(false);
   let activeSearch = $state<Parameters<NonNullable<typeof adapter.boardSearch>>[0] | null>(null);
-  let activeConnection = $state<BoardConnectionRequest | null>(null);
+  type CompletedConnections = { criteria: BoardConnectionRequest; page: BoardConnections };
+  let completedConnection = $state<CompletedConnections | null>(null);
+  const activeConnection = $derived(completedConnection?.criteria ?? null);
+  let pendingConnection: BoardConnectionRequest | null = null;
   let memberPages = $state<Record<string, BoardMemberPageState>>({});
   let memberGeneration = 0;
   let connectionScope = $state<string | null>(null);
@@ -70,10 +73,10 @@
   let withMembers = $state(true);
   let connectionKind = $state('');
   let connectionQ = $state('');
-  let connectionPage = $state<BoardConnections | null>(null);
+  const connectionPage = $derived(completedConnection?.page ?? null);
   let connectionBusy = $state(false);
   let connectionSelection = $state<string[]>([]);
-  type HistoryEntry = { id: string; direction: 'incoming' | 'outgoing'; members: boolean; kind: string; query: string; page: BoardConnections | null; selected: string[]; scroll: number; criteria: BoardConnectionRequest | null };
+  type HistoryEntry = { criteria: BoardConnectionRequest; completed: CompletedConnections | null; query: string; selected: string[]; scroll: number };
   let history = $state<HistoryEntry[]>([]);
   let pendingEvidence = $state<Record<string, number>>({});
   let importFile = $state<HTMLInputElement>(null!);
@@ -85,6 +88,11 @@
   const sourceHeights = new Map<string, number>();
   const originalIdentities = new Map<string, BoardDocument['symbols'][number]['identity']>();
   let request = 0; let searchRequest = 0; let connectionRequest = $state(0); let groupRequest = 0; let zIndex = 10; let epoch = 0; let saveEpoch = 0; let saveRequest = 0;
+  let listRequest = 0; let deletionSerial = 0;
+  const deletedAfter = new Map<string, number>();
+  const pendingSaves = new Map<number, { id?: string; resultId?: string; promise: ReturnType<NonNullable<typeof adapter.saveBoard>> }>();
+  let pendingReplacement: { id?: string; token: number } | null = null;
+  let deletingIds = $state<string[]>([]);
   const model = $derived(createBoardModel(symbols, relations));
   const filters = $derived({ tests: includeTests, generated: includeGenerated, uncertain: includeUncertain });
   const projection = $derived(model.projectBoard(included, hidden, expanded, kind, structure, limits, { ...filters, locatedMember, memberPages, eligibleIds }));
@@ -166,25 +174,30 @@
     finally { if (current === request) busy = false; }
   }
   async function add(ids: string[]) {
+    const generation = epoch;
     const firstSelection = included.length === 0;
     const unique = [...new Set([...included, ...ids])];
     if (new Set([...unique, ...expanded, ...hidden, ...nodes.filter((node) => node.type === 'code').map((node) => node.data.symbolId)]).size > 128) { error = 'A board can retain at most 128 symbol identities including source cards. Narrow the selection first.'; return; }
     included = unique; hidden = hidden.filter((id) => !ids.includes(id)); evidence = null;
     searchSelection = searchSelection.filter((id) => !ids.includes(id)); connectionSelection = [];
     await loadSnapshot(firstSelection);
+    if (generation !== epoch) return;
     notice = `${ids.length} chosen symbol(s) included. No neighbours added. Existing positions preserved.`;
     if (panel === 'hidden') void tick().then(() => boardElement.querySelector<HTMLElement>('aside h2, aside button')?.focus());
   }
   async function restoreHidden(ids: string[]) {
+    const generation = epoch;
     hidden = hidden.filter((id) => !ids.includes(id)); await loadSnapshot();
+    if (generation !== epoch) return;
     notice = 'Restored previous placement/visibility preferences without pinning new symbols; active filters still apply.';
   }
   async function includeTargets(ids: string[]) {
+    const generation = epoch;
     const states = ids.map((id) => ({ id, ...model.targetState(id, included, hidden) }));
     hidden = hidden.filter((id) => !states.some((item) => item.status === 'hidden' && item.representative === id));
     const additions = states.filter((item) => item.status === 'absent').map((item) => item.id);
     if (additions.length) await add(additions); else await loadSnapshot();
-    connectionSelection = [];
+    if (generation === epoch) connectionSelection = [];
   }
   async function targetAction(id: string) {
     const state = model.targetState(id, included, hidden);
@@ -193,23 +206,26 @@
     else await add([id]);
   }
   function choose(values: string[], id: string, checked: boolean) { return checked ? [...new Set([...values, id])] : values.filter((item) => item !== id); }
-  async function fitGraph() { await tick(); await fitView({ nodes: nodes.filter((node) => node.type === 'symbol'), padding: 0.16, maxZoom: 1, duration: 200 }); }
-  async function fitCode() { await tick(); await fitView({ nodes: nodes.filter((node) => node.type === 'code'), padding: 0.14, maxZoom: 1, duration: 200 }); }
+  async function fitGraph() { const generation = epoch; await tick(); if (generation === epoch) await fitView({ nodes: nodes.filter((node) => node.type === 'symbol'), padding: 0.16, maxZoom: 1, duration: 200 }); }
+  async function fitCode() { const generation = epoch; await tick(); if (generation === epoch) await fitView({ nodes: nodes.filter((node) => node.type === 'code'), padding: 0.14, maxZoom: 1, duration: 200 }); }
   async function fitSelection() {
     const selection = nodes.filter((node) => node.selected);
     if (!selection.length) { notice = 'Select cards by their headers (Shift for several), then Fit selection.'; return; }
     await tick(); await fitView({ nodes: selection, padding: 0.25, maxZoom: 1.1, duration: 200 });
   }
   async function locate(id: string) {
+    const generation = epoch;
     const state = model.targetState(id, included, hidden); if (state.status !== 'visible') return;
     const owner = state.representative;
     const reveal = model.revealMember(id, owner, expanded, limits);
     if (new Set([...included, ...hidden, ...expanded, ...reveal.expanded, ...nodes.filter((node) => node.type === 'code').map((node) => node.data.symbolId)]).size > 128) { error = 'Locating this path would exceed the 128 retained-identity limit. Collapse or remove another selection first.'; return; }
     expanded = reveal.expanded; limits = reveal.limits; locatedMember = reveal.locatedMember;
-    for (const parent of reveal.path.slice(0, -1)) await ensureMembers(parent, limits[parent] ?? 6);
+    for (const parent of reveal.path.slice(0, -1)) { await ensureMembers(parent, limits[parent] ?? 6); if (generation !== epoch) return; }
     selected = owner; refresh(); nodes = nodes.map((node) => ({ ...node, selected: node.id === owner }));
-    await tick(); await fitView({ nodes: [{ id: owner }], padding: 0.5, maxZoom: 1, duration: 200 });
-    await tick(); boardElement?.querySelector<HTMLElement>(`[data-member="${CSS.escape(id)}"] button.member-name`)?.focus();
+    await tick(); if (generation !== epoch) return;
+    await fitView({ nodes: [{ id: owner }], padding: 0.5, maxZoom: 1, duration: 200 });
+    await tick(); if (generation !== epoch) return;
+    boardElement?.querySelector<HTMLElement>(`[data-member="${CSS.escape(id)}"] button.member-name`)?.focus();
     notice = owner === id ? `Located ${display(id)}.` : `Located exact member: ${reveal.path.map(display).join(' → ')}.`;
   }
   function act(action: SymbolAction, id: string) {
@@ -240,51 +256,63 @@
     else openCode(id);
   }
   function connectionArgs(offset = 0): BoardConnectionRequest { return { id: connectionScope!, direction, members: withMembers, kind: connectionKind || undefined, q: connectionQ || undefined, offset, ...filters }; }
-  async function loadConnections(offset = 0, paging = false) {
+  async function loadConnections(offset = 0, paging = false, submitted?: BoardConnectionRequest) {
     if (!adapter.boardConnections || !connectionScope) return;
     const current = ++connectionRequest; connectionBusy = true; error = ''; pendingEvidence = {};
+    const criteria = submitted ?? (paging && activeConnection ? { ...activeConnection, offset } : connectionArgs(offset));
+    pendingConnection = { ...criteria };
     try {
-      const criteria = paging && activeConnection ? { ...activeConnection, offset } : connectionArgs(offset);
       const value = await adapter.boardConnections(criteria);
       if (current !== connectionRequest) return;
       merge([value.scope, ...value.symbols, ...value.items.flatMap((row) => row.owner ? [row.target, row.owner] : [row.target])]);
-      activeConnection = { ...criteria }; connectionPage = value;
+      completedConnection = { criteria: { ...criteria }, page: value };
       notice = `Connections: showing ${offset + (value.items.length ? 1 : 0)}–${offset + value.items.length} of ${value.total} targets. Selection is retained across pages.`;
-      if (paging) void tick().then(() => { boardElement.querySelector<HTMLElement>('.connections-panel h2')?.focus(); const list = boardElement.querySelector('.connections-panel .result-list'); if (list) list.scrollTop = 0; });
+      if (paging) void tick().then(() => { if (current !== connectionRequest) return; boardElement.querySelector<HTMLElement>('.connections-panel h2')?.focus(); const list = boardElement.querySelector('.connections-panel .result-list'); if (list) list.scrollTop = 0; });
     } catch (cause) { if (current === connectionRequest) fail(cause); }
-    finally { if (current === connectionRequest) connectionBusy = false; }
+    finally { if (current === connectionRequest) { connectionBusy = false; pendingConnection = null; } }
   }
   async function openConnections(id: string, options: { members?: boolean; kind?: string } = {}) {
-    if (panel === 'connections' && connectionScope) history = [...history.slice(-9), { id: connectionScope, direction, members: withMembers, kind: connectionKind, query: connectionQ, page: connectionPage, selected: [...connectionSelection], scroll: boardElement.querySelector('.connections-panel .result-list')?.scrollTop ?? 0, criteria: activeConnection ? { ...activeConnection } : null }];
+    if (panel === 'connections' && connectionScope) history = [...history.slice(-9), {
+      criteria: { ...(completedConnection?.criteria ?? pendingConnection ?? connectionArgs()) }, completed: completedConnection,
+      query: connectionQ, selected: [...connectionSelection], scroll: boardElement.querySelector('.connections-panel .result-list')?.scrollTop ?? 0,
+    }];
     else history = [];
     connectionScope = id; direction = 'outgoing'; withMembers = options.members ?? (cardFamily(model.symbol(id).kind) === 'type' || model.symbol(id).kind === 'component');
-    connectionKind = options.kind ?? ''; connectionQ = ''; connectionSelection = []; connectionPage = null; setPanel('connections');
+    connectionKind = options.kind ?? ''; connectionQ = ''; connectionSelection = []; completedConnection = null; pendingConnection = null; setPanel('connections');
     await loadConnections();
   }
   async function backConnections() {
     const entry = history.at(-1); if (!entry) return;
-    ++connectionRequest; history = history.slice(0, -1); connectionScope = entry.id; direction = entry.direction; withMembers = entry.members;
-    connectionKind = entry.kind; connectionQ = entry.query; connectionPage = entry.page; connectionSelection = entry.selected; connectionBusy = false;
-    activeConnection = entry.criteria; pendingEvidence = {};
-    if (entry.page) merge(entry.page.symbols);
-    await tick(); boardElement.querySelector<HTMLElement>('.connections-panel h2')?.focus();
+    ++connectionRequest; history = history.slice(0, -1);
+    const criteria = entry.completed?.criteria ?? entry.criteria;
+    connectionScope = criteria.id; direction = criteria.direction; withMembers = criteria.members;
+    connectionKind = criteria.kind ?? ''; connectionQ = entry.query; connectionSelection = entry.selected; connectionBusy = false;
+    completedConnection = entry.completed; pendingConnection = null; pendingEvidence = {};
+    if (entry.completed) merge(entry.completed.page.symbols);
+    const pending = entry.completed ? null : loadConnections(criteria.offset ?? 0, false, criteria);
+    const current = connectionRequest;
+    if (pending) await pending;
+    await tick(); if (current !== connectionRequest) return;
+    boardElement.querySelector<HTMLElement>('.connections-panel h2')?.focus();
     const list = boardElement.querySelector('.connections-panel .result-list'); if (list) list.scrollTop = entry.scroll;
   }
   async function moreEvidence(target: string, offset: number) {
-    if (!adapter.boardEvidence || !connectionPage || pendingEvidence[target] === connectionRequest) return;
-    const current = connectionRequest;
+    if (!adapter.boardEvidence || !completedConnection || connectionBusy || busy || pendingEvidence[target] === connectionRequest) return;
+    const current = connectionRequest; const criteria = completedConnection.criteria;
     pendingEvidence = { ...pendingEvidence, [target]: current };
     try {
-      const value = await adapter.boardEvidence({ ...(activeConnection ?? connectionArgs()), offset, target });
-      if (current !== connectionRequest || !connectionPage) return;
+      const value = await adapter.boardEvidence({ ...criteria, offset, target });
+      if (current !== connectionRequest || completedConnection?.criteria !== criteria) return;
       merge(value.symbols);
-      connectionPage = { ...connectionPage, items: connectionPage.items.map((row) => row.target.id === target ? { ...row, evidence: [...new Map([...row.evidence, ...value.items].map((edge) => [edge.id, edge])).values()] } : row) };
-    } catch (cause) { if (current === connectionRequest) fail(cause); }
+      completedConnection = { criteria, page: { ...completedConnection.page, items: completedConnection.page.items.map((row) => row.target.id === target ? { ...row, evidence: [...new Map([...row.evidence, ...value.items].map((edge) => [edge.id, edge])).values()] } : row) } };
+    } catch (cause) { if (current === connectionRequest && completedConnection?.criteria === criteria) fail(cause); }
     finally { if (pendingEvidence[target] === current) { const rest = { ...pendingEvidence }; delete rest[target]; pendingEvidence = rest; } }
   }
   async function changeFilters() {
+    const generation = epoch;
     ++memberGeneration; memberPages = {}; connectionSelection = []; searchSelection = []; history = [];
     await loadSnapshot();
+    if (generation !== epoch) return;
     if (panel === 'library') { if (libraryMode === 'symbols') await search(); else await groups(); }
     if (panel === 'connections') await loadConnections();
   }
@@ -319,7 +347,7 @@
         items.push(...page.items); offset = page.nextOffset;
       }
       merge(items); await add(items.map((item) => item.id));
-    } catch (cause) { fail(cause); }
+    } catch (cause) { if (current === searchRequest) fail(cause); }
   }
   async function ensureMembers(id: string, desired = 6) {
     if (!adapter.boardMembers || id.startsWith('missing:')) return;
@@ -372,16 +400,17 @@
       if (token !== epoch) return;
       merge(value.symbols);
       if (value.missing.length) notes = [...notes, `${value.missing.length} requested reader identities are no longer in this index.`];
-      if (value.included.length) { await add(value.included); await fitGraph(); }
+      if (value.included.length) { await add(value.included); if (token === epoch) await fitGraph(); }
     } catch (cause) { if (token === epoch) fail(cause); }
   }
   $effect(() => { if (boardRequests.pending.length) untrack(() => { void acceptReaderRequests(boardRequests.take()); }); });
   async function forget(id: string) {
+    const generation = epoch;
     if (!window.confirm(`Remove ${display(id)} from this board's selection? Its source and indexed graph are unchanged.`)) return;
     included = included.filter((item) => item !== id); hidden = hidden.filter((item) => item !== id && model.representative(item, included, []) !== null);
     expanded = expanded.filter((item) => item !== id && model.representative(item, included, []) !== null);
     positions.delete(id); hideHistory = hideHistory.filter((item) => item !== id); selected = null;
-    await loadSnapshot(); notice = 'Removed from the board recipe only. Any independent source card remains open.';
+    await loadSnapshot(); if (generation === epoch) notice = 'Removed from the board recipe only. Any independent source card remains open.';
   }
   function closeCard(id: string) { nodes = nodes.filter((node) => node.id !== id); sourceHeights.delete(id); void tick().then(() => boardElement?.querySelector<HTMLElement>('[data-add-symbols]')?.focus()); }
   function resizeCard(id: string, widthDelta: number, heightDelta: number) {
@@ -415,6 +444,21 @@
       const position = { x, y }; x += 400; height = Math.max(height, node.measured?.height ?? 240); return { ...node, position }; });
     void fitGraph();
   }
+  /** Reset reviewer-owned recipe/discovery state, not host capabilities or in-flight metadata writes. */
+  function resetBoardState() {
+    ++request; ++searchRequest; ++connectionRequest; ++groupRequest; ++memberGeneration;
+    memberPages = {}; symbols = []; relations = []; included = []; hidden = []; expanded = []; limits = {}; nodes = [];
+    originalIdentities.clear(); positions.clear(); sourceHeights.clear(); snapshotIds = new Set(); eligibleIds = new Set();
+    selected = null; selectedSources = []; locatedMember = undefined; hideHistory = []; zIndex = 10;
+    kind = ''; structure = false; includeTests = false; includeGenerated = false; includeUncertain = false; excluded = undefined;
+    libraryMode = 'symbols'; libraryQ = ''; libraryKind = ''; libraryPath = ''; libraryNamespace = ''; namespaceName = '';
+    searchSelection = []; searchPage = null; activeSearch = null; searchBusy = false;
+    groupQuery = ''; groupPage = null; activeGroup = null; groupBusy = false;
+    connectionScope = null; direction = 'outgoing'; withMembers = true; connectionKind = ''; connectionQ = '';
+    completedConnection = null; pendingConnection = null; connectionSelection = []; connectionBusy = false; pendingEvidence = {}; history = [];
+    panel = null; evidence = null; helpOpen = false; returnFocus = null; viewport = { x: 0, y: 0, zoom: 1 };
+    busy = false; notes = []; error = '';
+  }
   function documentState(): BoardDocument {
     const ids = [...new Set([...included, ...expanded, ...hidden, ...nodes.filter((node) => node.type === 'code').map((node) => node.data.symbolId as string)])];
     const keys = new Map(ids.map((id, index) => [id, `s${index}`]));
@@ -426,20 +470,29 @@
       viewport: { ...viewport }, filters: { kind, showStructure: structure, includeTests, includeGenerated, includeUncertain } };
   }
   function fingerprint(name = boardName, document = documentState()) { return JSON.stringify({ name, document }); }
-  async function listBoards() { try { if (adapter.boards) boardList = await adapter.boards(); } catch (cause) { fail(cause); } }
+  async function listBoards() {
+    const current = ++listRequest;
+    try { if (adapter.boards) { const value = await adapter.boards(); if (current === listRequest) boardList = value; } }
+    catch (cause) { if (current === listRequest) fail(cause); }
+  }
   async function save(asNew = false) {
-    if (readOnly || !adapter.saveBoard) return;
+    const id = asNew ? undefined : boardId;
+    if (readOnly || !adapter.saveBoard || saving || (id && deletingIds.includes(id))) return;
     error = ''; saving = true;
-    const token = saveEpoch; const operation = ++saveRequest; const name = boardName; const document = documentState();
+    const token = saveEpoch; const operation = ++saveRequest; const name = boardName; const document = documentState(); const started = deletionSerial;
     try {
-      const value = await adapter.saveBoard({ name, ...(!asNew && boardId ? { id: boardId } : {}), document });
-      if (token !== saveEpoch || operation !== saveRequest) return;
+      const pending = { id, resultId: undefined as string | undefined, promise: adapter.saveBoard({ name, ...(id ? { id } : {}), document }) };
+      pendingSaves.set(operation, pending);
+      const value = await pending.promise; pending.resultId = value.id;
+      if (token !== saveEpoch || operation !== saveRequest || (deletedAfter.get(value.id) ?? 0) > started) return;
       boardId = value.id; if (boardName === name) boardName = value.name;
       savedFingerprint = fingerprint(value.name, document); notice = `Saved ${value.name} in .codegraph/ui/boards/.`; await listBoards();
-    } catch (cause) { if (token === saveEpoch && operation === saveRequest) fail(cause); } finally { if (operation === saveRequest) saving = false; }
+    } catch (cause) { if (token === saveEpoch && operation === saveRequest) fail(cause); }
+    finally { pendingSaves.delete(operation); if (!pendingSaves.size) deletedAfter.clear(); if (operation === saveRequest) saving = false; }
   }
   function canReplace() { return !dirty || window.confirm('This board has unsaved changes. Replace it without saving?'); }
-  async function applyLoaded(value: BoardLoaded, token: number, expected: string): Promise<boolean> {
+  async function applyLoaded(value: BoardLoaded, token: number, expected: string, commit: () => void): Promise<boolean> {
+    if (token !== epoch) return false;
     // Resolve and fetch into locals before changing any reviewer-owned state.
     const mapping = new Map(value.resolutions.filter((item) => item.node).map((item) => [item.key, item.node!.id]));
     const ids = value.board.symbols.filter((item) => item.included && mapping.has(item.key)).map((item) => mapping.get(item.key)!);
@@ -460,8 +513,8 @@
     }
     if (token !== epoch) return false;
     if (expected !== fingerprint()) { notice = 'Board changed while a replacement was loading; newer work was preserved. Retry the operation.'; busy = false; return false; }
-    ++request; ++connectionRequest; ++searchRequest; ++memberGeneration; memberPages = {};
-    originalIdentities.clear(); positions.clear(); sourceHeights.clear();
+    ++saveEpoch; ++saveRequest; saving = false;
+    resetBoardState();
     const loaded: BoardSymbol[] = [];
     for (const entry of value.board.symbols) {
       const resolution = value.resolutions.find((item) => item.key === entry.key);
@@ -472,7 +525,7 @@
     }
     symbols = [...new Map(loaded.map((item) => [item.id, item])).values()]; nodes = []; relations = snapshot?.relations ?? [];
     snapshotIds = new Set(snapshot?.symbols.map((item) => item.id) ?? []);
-    eligibleIds = new Set(snapshot?.scopeIds ?? snapshotIds);
+    eligibleIds = new Set(snapshot?.scopeIds ?? snapshotIds); excluded = snapshot?.excluded;
     merge(value.symbols ?? []); if (snapshot) merge(snapshot.symbols); merge(restoredMembers); notes = [...(snapshot?.notes ?? []), ...(value.notes ?? [])]; memberPages = restoredPages;
     included = [...new Set(value.board.symbols.filter((item) => item.included).map((item) => mapping.get(item.key)!))];
     hidden = [...new Set(value.board.symbols.filter((item) => item.hidden).map((item) => mapping.get(item.key)!))];
@@ -491,27 +544,41 @@
     }
     viewport = { ...value.board.viewport };
     notice = 'Board restored; missing or ambiguous symbols are labelled placeholders. No fuzzy replacements.';
+    commit();
     return true;
   }
   async function openBoard(id: string) {
     if (!adapter.loadBoard || !canReplace()) return;
-    const token = ++epoch; const expected = fingerprint(); busy = true;
+    const token = ++epoch; const expected = fingerprint(); busy = true; pendingReplacement = { id, token };
     try {
       const value = await adapter.loadBoard(id);
-      if (await applyLoaded(value, token, expected)) { ++saveEpoch; ++saveRequest; saving = false; boardId = id; boardName = boardList?.boards.find((item) => item.id === id)?.name ?? ''; savedFingerprint = fingerprint(); }
-    } catch (cause) { if (token === epoch) fail(cause); } finally { if (token === epoch) busy = false; }
+      await applyLoaded(value, token, expected, () => { boardId = id; boardName = boardList?.boards.find((item) => item.id === id)?.name ?? ''; savedFingerprint = fingerprint(); });
+    } catch (cause) { if (token === epoch) fail(cause); }
+    finally { if (pendingReplacement?.token === token) pendingReplacement = null; if (token === epoch) busy = false; }
   }
   async function removeBoard(id: string) {
-    if (readOnly || !adapter.deleteBoard || !window.confirm('Delete this saved board metadata? Source and graph are unchanged.')) return;
-    try { await adapter.deleteBoard(id); if (boardId === id) { boardId = undefined; savedFingerprint = ''; } await listBoards(); } catch (cause) { fail(cause); }
+    if (readOnly || !adapter.deleteBoard || deletingIds.includes(id) || !window.confirm('Delete this saved board metadata? Source and graph are unchanged.')) return;
+    deletingIds = [...deletingIds, id];
+    try {
+      // An abort/generation guard cannot undo an already dispatched server write.
+      // Wait for same-ID (or not-yet-assigned Save-as) requests before deleting.
+      await Promise.all([...pendingSaves.values()].filter((item) => item.id === id || item.id === undefined).map((item) => item.promise.catch(() => undefined)));
+      await adapter.deleteBoard(id);
+      deletedAfter.set(id, ++deletionSerial);
+      if (pendingReplacement?.id === id && pendingReplacement.token === epoch) { ++epoch; pendingReplacement = null; busy = false; }
+      const activeSave = pendingSaves.get(saveRequest);
+      if (activeSave?.id === id || activeSave?.resultId === id) { ++saveRequest; saving = false; }
+      if (boardId === id) { boardId = undefined; savedFingerprint = ''; }
+      ++listRequest; notice = 'Saved board deleted. Any in-memory arrangement is retained without its saved binding.';
+      await listBoards();
+    } catch (cause) { fail(cause); }
+    finally { deletingIds = deletingIds.filter((item) => item !== id); if (!pendingSaves.size) deletedAfter.clear(); }
   }
   function newBoard() {
     if (!canReplace()) return;
-    ++epoch; ++saveEpoch; ++saveRequest; ++request; ++searchRequest; ++connectionRequest; ++groupRequest; ++memberGeneration; memberPages = {}; busy = false; saving = false; symbols = []; relations = []; included = []; hidden = []; expanded = []; nodes = []; originalIdentities.clear(); positions.clear(); snapshotIds = new Set(); eligibleIds = new Set(); selectedSources = [];
-    boardId = undefined; boardName = ''; kind = ''; structure = false; includeTests = false; includeGenerated = false; includeUncertain = false; excluded = undefined;
-    libraryNamespace = ''; namespaceName = ''; libraryPath = ''; searchSelection = []; searchPage = null; groupPage = null; history = []; connectionPage = null;
-    panel = null; evidence = null; viewport = { x: 0, y: 0, zoom: 1 };
-    savedFingerprint = fingerprint(); notes = []; error = ''; notice = 'New empty board. Add only the symbols you choose.';
+    ++epoch; ++saveEpoch; ++saveRequest; pendingReplacement = null; saving = false;
+    resetBoardState(); boardRequests.take(); boardId = undefined; boardName = '';
+    savedFingerprint = fingerprint(); notice = 'New empty board. Add only the symbols you choose.';
     void tick().then(() => boardElement?.querySelector<HTMLElement>('[data-add-symbols]')?.focus());
   }
   function exportBoard() {
@@ -520,14 +587,14 @@
   }
   async function importBoard(event: Event) {
     const file = (event.target as HTMLInputElement).files?.[0]; if (!file || !canReplace()) return;
-    const token = ++epoch; const expected = fingerprint(); busy = true;
+    const token = ++epoch; const expected = fingerprint(); busy = true; pendingReplacement = { token };
     try {
       if (file.size > 1024 * 1024) throw new Error('Board import exceeds 1 MiB.');
       const value = JSON.parse(await file.text()) as { name?: string; document?: BoardDocument };
       if (!adapter.resolveBoard) throw new Error('This host cannot validate/resolve imported boards.');
       const loaded = await adapter.resolveBoard(value.document ?? value as unknown as BoardDocument);
-      if (await applyLoaded(loaded, token, expected)) { ++saveEpoch; ++saveRequest; saving = false; boardId = undefined; boardName = typeof value.name === 'string' ? value.name.slice(0, 120) : 'Imported board'; savedFingerprint = ''; notice = 'Imported into memory only. Save as to keep a project-local copy.'; }
-    } catch (cause) { if (token === epoch) fail(cause); } finally { importFile.value = ''; if (token === epoch) busy = false; }
+      await applyLoaded(loaded, token, expected, () => { boardId = undefined; boardName = typeof value.name === 'string' ? value.name.slice(0, 120) : 'Imported board'; savedFingerprint = ''; notice = 'Imported into memory only. Save as to keep a project-local copy.'; });
+    } catch (cause) { if (token === epoch) fail(cause); } finally { if (pendingReplacement?.token === token) pendingReplacement = null; importFile.value = ''; if (token === epoch) busy = false; }
   }
   function showEvidence(edge: Edge) {
     if (!edge.data?.relation) return;
@@ -554,11 +621,11 @@
   }
   async function refreshIndex() {
     if (!adapter.resolveBoard || !documentState().symbols.length) return;
-    const token = ++epoch; const expected = fingerprint(); const wasDirty = dirty; busy = true;
+    const token = ++epoch; const expected = fingerprint(); const wasDirty = dirty; busy = true; pendingReplacement = { id: boardId, token };
     try {
       const loaded = await adapter.resolveBoard(documentState());
-      if (await applyLoaded(loaded, token, expected)) { if (!wasDirty) savedFingerprint = fingerprint(); notice = 'Index refreshed; identities re-resolved and arrangement preserved.'; }
-    } catch (cause) { if (token === epoch) fail(cause); } finally { if (token === epoch) busy = false; }
+      await applyLoaded(loaded, token, expected, () => { if (!wasDirty) savedFingerprint = fingerprint(); notice = 'Index refreshed; identities re-resolved and arrangement preserved.'; });
+    } catch (cause) { if (token === epoch) fail(cause); } finally { if (pendingReplacement?.token === token) pendingReplacement = null; if (token === epoch) busy = false; }
   }
   let seenIndex = live.indexTick;
   $effect(() => { const value = live.indexTick; if (value !== seenIndex) { seenIndex = value; untrack(() => { void refreshIndex(); }); } });
@@ -586,7 +653,7 @@
   {#if error}<div class="error" role="alert">{error}<button onclick={() => error = ''} aria-label="Dismiss board error">×</button></div>{/if}
   {#if notes.length}<details class="bounds"><summary>Index boundaries / query limits ({notes.length})</summary>{#each notes as note}<p>{note}</p>{/each}</details>{/if}
   <div class="canvas" aria-label="Review board canvas" role="group">
-    <SvelteFlow bind:nodes bind:viewport {edges} {nodeTypes} {edgeTypes} minZoom={0.15} maxZoom={1.6} nodesConnectable={false} deleteKey={null} zoomOnDoubleClick={false} panOnDrag proOptions={{ hideAttribution: true }}
+    <SvelteFlow bind:nodes bind:viewport {edges} {nodeTypes} {edgeTypes} minZoom={0.15} maxZoom={1.6} nodesConnectable={false} deleteKey={[]} zoomOnDoubleClick={false} panOnDrag proOptions={{ hideAttribution: true }}
       onnodeclick={({ node }) => { selected = node.type === 'symbol' ? node.id : model.targetState(node.data.symbolId, included, hidden).representative; if (node.type === 'code') nodes = nodes.map((item) => item.id === node.id ? { ...item, zIndex: ++zIndex } : item); }}
       onedgeclick={({ edge }) => showEvidence(edge)} onselectionchange={({ edges: selectedEdges, nodes: selectedNodes }) => { reflectSourceSelection(selectedNodes); if (selectedEdges.length === 1) showEvidence(selectedEdges[0]!); }} onpaneclick={() => { selected = null; evidence = null; }}>
       <Background gap={24} size={1} patternColor="var(--rule-soft)" /><Controls showLock={false} /><MiniMap pannable zoomable nodeColor={(node) => node.type === 'code' ? 'var(--press-2)' : 'var(--accent)'} />
@@ -619,15 +686,15 @@
           <section class="result" data-connection-target={row.target.id}><label class="choice"><input type="checkbox" aria-label={`Select target ${row.target.qualifiedName}`} disabled={state.status === 'visible'} checked={connectionSelection.includes(row.target.id)} onchange={(event) => connectionSelection = choose(connectionSelection, row.target.id, event.currentTarget.checked)} /><KindGlyph kind={row.target.kind} /><strong>{row.target.name}</strong></label><small>{row.target.kind} · {row.target.qualifiedName} · {row.target.file}</small>
             <div class="tags">{#each [...new Set(row.evidence.map((edge) => edge.kind))] as item}<span>{kindLabel(item)}</span>{/each}</div><p>{state.status === 'visible' ? state.representative === row.target.id ? 'Pinned on board' : `Folded in ${display(state.representative)}` : state.status === 'hidden' ? `Hidden in ${display(state.representative)}` : 'Not on board'}</p>
             <div class="row-actions"><button aria-label={`${state.status === 'visible' ? 'Locate' : state.status === 'hidden' ? 'Restore' : 'Add'} target ${row.target.qualifiedName}`} onclick={() => targetAction(row.target.id)}>{state.status === 'visible' ? 'Locate' : state.status === 'hidden' ? 'Restore' : 'Add to board'}</button>{#if row.owner}{@const ownerState = model.targetState(row.owner.id, included, hidden)}<button onclick={() => targetAction(row.owner!.id)}>{ownerState.status === 'visible' ? 'Locate' : ownerState.status === 'hidden' ? 'Restore' : 'Add'} owner: {row.owner.name}</button>{/if}{#if state.status === 'visible' && state.representative !== row.target.id}<button onclick={() => add([row.target.id])}>Pin separately</button>{/if}<button onclick={() => openCode(row.target.id)}>Source</button><button aria-label={`Connections for target ${row.target.qualifiedName}`} onclick={() => openConnections(row.target.id)}>Connections</button></div>
-            <details><summary>{row.total} indexed evidence items</summary>{#each row.evidence as edge (edge.id)}<div class="evidence-row"><b>{display(edge.source)}</b> → {relationLabel(edge.kind)} → <b>{display(edge.target)}</b><small>{edge.file ?? 'Indexed edge'}{edge.line ? `:${edge.line}` : ''} · {edge.provenance ?? 'provenance unspecified'}{edge.confidence !== undefined ? ` · confidence ${edge.confidence}` : ''}</small>{#if edge.via || edge.synthesizedBy}<p>{edge.via ?? edge.synthesizedBy} {edge.registeredAt ?? ''}</p>{/if}<button onclick={() => compare(edge)}>Compare source ↗</button></div>{/each}{#if row.evidence.length < row.total}<button disabled={pendingEvidence[row.target.id] === connectionRequest} onclick={() => moreEvidence(row.target.id, row.evidence.length)}>More evidence ({row.total - row.evidence.length})</button>{/if}</details>
+            <details><summary>{row.total} indexed evidence items</summary>{#each row.evidence as edge (edge.id)}<div class="evidence-row"><b>{display(edge.source)}</b> → {relationLabel(edge.kind)} → <b>{display(edge.target)}</b><small>{edge.file ?? 'Indexed edge'}{edge.line ? `:${edge.line}` : ''} · {edge.provenance ?? 'provenance unspecified'}{edge.confidence !== undefined ? ` · confidence ${edge.confidence}` : ''}</small>{#if edge.via || edge.synthesizedBy}<p>{edge.via ?? edge.synthesizedBy} {edge.registeredAt ?? ''}</p>{/if}<button onclick={() => compare(edge)}>Compare source ↗</button></div>{/each}{#if row.evidence.length < row.total}<button disabled={!adapter.boardEvidence || connectionBusy || busy || pendingEvidence[row.target.id] === connectionRequest} onclick={() => moreEvidence(row.target.id, row.evidence.length)}>More evidence ({row.total - row.evidence.length})</button>{#if !adapter.boardEvidence}<p class="hint">This host does not provide further evidence pages.</p>{/if}{/if}</details>
           </section>{/each}
-          {#if (activeConnection?.offset ?? 0) > 0}<button class="more" disabled={connectionBusy} onclick={() => loadConnections(Math.max(0, (activeConnection?.offset ?? 0) - 30), true)}>Previous targets</button>{/if}{#if connectionPage?.nextOffset !== null && connectionPage?.nextOffset !== undefined}<button class="more" disabled={connectionBusy} onclick={() => loadConnections(connectionPage!.nextOffset!, true)}>Next targets</button>{/if}{#if connectionBusy}<p>Loading connections…</p>{/if}
+          {#if (activeConnection?.offset ?? 0) > 0}<button class="more" disabled={connectionBusy} onclick={() => loadConnections(Math.max(0, (activeConnection?.offset ?? 0) - 30), true)}>Previous targets</button>{/if}{#if connectionPage?.nextOffset !== null && connectionPage?.nextOffset !== undefined}<button class="more" disabled={connectionBusy} onclick={() => loadConnections(connectionPage!.nextOffset!, true)}>Next targets</button>{/if}{#if connectionBusy}<p>Loading connections…{connectionPage ? ' Previous completed results are shown until this request finishes.' : ''}</p>{/if}
         </div>
       </aside>
     {:else if panel === 'hidden'}
       <aside class="panel" aria-label="Hidden items"><div class="panel-heading"><h2 tabindex="-1">Hidden items ({hidden.length})</h2>{#if hidden.length}<button onclick={() => restoreHidden([...hidden])}>Restore all hidden</button>{/if}<button onclick={closePanel} aria-label="Close hidden items">×</button></div><div class="result-list">{#each hidden as id}<section class="result"><strong>{display(id)}</strong><div class="row-actions"><button onclick={() => restoreHidden([id])}>Restore</button>{#if included.includes(id)}<button onclick={() => forget(id)}>Remove from board</button>{/if}</div></section>{:else}<p class="hint">Nothing hidden.</p>{/each}</div></aside>
     {:else if panel === 'boards'}
-      <aside class="panel" aria-label="Saved boards"><div class="panel-heading"><h2 tabindex="-1">Saved boards</h2><button onclick={closePanel} aria-label="Close saved boards">×</button></div><p class="hint">{boardList?.directory ?? '.codegraph/ui/boards/'} · {boardList?.skipped ?? 0} unreadable files skipped{boardList?.bounded ? ' · list bounded' : ''}</p><div class="result-list">{#each boardList?.boards ?? [] as item}<section class="result"><strong>{item.name}</strong><small>{item.updatedAt}</small><div class="row-actions"><button disabled={!adapter.loadBoard} onclick={() => openBoard(item.id)}>Open {item.name}</button><button disabled={readOnly || !adapter.deleteBoard} onclick={() => removeBoard(item.id)}>Delete</button></div></section>{:else}<p class="hint">No saved boards.</p>{/each}</div></aside>
+      <aside class="panel" aria-label="Saved boards"><div class="panel-heading"><h2 tabindex="-1">Saved boards</h2><button onclick={closePanel} aria-label="Close saved boards">×</button></div><p class="hint">{boardList?.directory ?? '.codegraph/ui/boards/'} · {boardList?.skipped ?? 0} unreadable files skipped{boardList?.bounded ? ' · list bounded' : ''}</p><div class="result-list">{#each boardList?.boards ?? [] as item}<section class="result"><strong>{item.name}</strong><small>{item.updatedAt}</small><div class="row-actions"><button disabled={!adapter.loadBoard} onclick={() => openBoard(item.id)}>Open {item.name}</button><button disabled={readOnly || !adapter.deleteBoard || deletingIds.includes(item.id)} onclick={() => removeBoard(item.id)}>{deletingIds.includes(item.id) ? 'Deleting…' : 'Delete'}</button></div></section>{:else}<p class="hint">No saved boards.</p>{/each}</div></aside>
     {/if}
     {#if evidence}<aside class="panel" aria-label="Relationship evidence"><div class="panel-heading"><h2 tabindex="-1">{relationLabel(evidence.kind)}</h2><button onclick={closePanel} aria-label="Close relationship evidence">×</button></div><p class="hint">{evidence.evidence.length} shown indexed edges. Browse Connections for full paged evidence when this projection is bounded.</p><div class="result-list">{#each evidence.evidence as edge (edge.id)}<section class="result"><strong>{display(edge.source)}</strong><span>→ {relationLabel(edge.kind)} →</span><strong>{display(edge.target)}</strong><small>{edge.file ?? ''}:{edge.line ?? ''} · {edge.provenance ?? 'unspecified'} · {edge.confidence ?? 'confidence unspecified'}</small>{#if edge.via || edge.synthesizedBy}<p>{edge.via ?? edge.synthesizedBy} {edge.registeredAt ?? ''}</p>{/if}<button onclick={() => compare(edge)}>Compare source ↗</button></section>{/each}</div></aside>{/if}
     <div class="notice" role="status">{busy ? 'Loading board…' : notice}</div>

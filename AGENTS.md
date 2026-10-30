@@ -49,7 +49,8 @@ and `scripts/pack-npm.sh` only packs a tarball when `CODEGRAPH_PACK_UI=1`.
 
 Tests run as **two Vitest projects** (`test.projects` in `vitest.config.mts`): `engine` (node) and `ui` (jsdom, the
 Svelte plugin, `resolve.conditions: ['browser']`) for `__tests__/ui-package.test.ts` and
-`__tests__/ui-board-shortcuts.test.ts`.
+`__tests__/ui-board-shortcuts.test.ts`, plus the mounted Board lifecycle/geometry
+regressions in `__tests__/ui-board-canvas.test.ts`.
 `npm test` still runs both. The split is not cosmetic — `browser` is a package-resolution
 condition, and applied globally it hands the engine's suites the browser builds of
 `web-tree-sitter` and friends. The root config (`vitest.config.mts`, `.mts` because the plugin is
