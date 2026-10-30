@@ -90,7 +90,7 @@ buildNpmPackage {
     export XDG_DATA_HOME="$HOME/.local/share"
     export CODEGRAPH_TELEMETRY=0
     mkdir -p "$HOME"
-    node --liftoff-only --disable-warning=ExperimentalWarning ${./smoke-test.cjs} "$out"
+    node --liftoff-only --disable-warning=ExperimentalWarning ${./smoke-test.cjs} "$out" ${lib.getExe nodejs_24}
     runHook postInstallCheck
   '';
 
