@@ -190,6 +190,9 @@
     hidden = hidden.filter((id) => !ids.includes(id)); await loadSnapshot();
     if (generation !== epoch) return;
     notice = 'Restored previous placement/visibility preferences without pinning new symbols; active filters still apply.';
+    if (panel === 'hidden') void tick().then(() => {
+      if (generation === epoch && panel === 'hidden') boardElement.querySelector<HTMLElement>('aside h2')?.focus();
+    });
   }
   async function includeTargets(ids: string[]) {
     const generation = epoch;
@@ -491,7 +494,7 @@
     finally { pendingSaves.delete(operation); if (!pendingSaves.size) deletedAfter.clear(); if (operation === saveRequest) saving = false; }
   }
   function canReplace() { return !dirty || window.confirm('This board has unsaved changes. Replace it without saving?'); }
-  async function applyLoaded(value: BoardLoaded, token: number, expected: string, commit: () => void): Promise<boolean> {
+  async function applyLoaded(value: BoardLoaded, token: number, expected: string, commit: () => void, options: { preserveSave?: boolean } = {}): Promise<boolean> {
     if (token !== epoch) return false;
     // Resolve and fetch into locals before changing any reviewer-owned state.
     const mapping = new Map(value.resolutions.filter((item) => item.node).map((item) => [item.key, item.node!.id]));
@@ -513,7 +516,9 @@
     }
     if (token !== epoch) return false;
     if (expected !== fingerprint()) { notice = 'Board changed while a replacement was loading; newer work was preserved. Retry the operation.'; busy = false; return false; }
-    ++saveEpoch; ++saveRequest; saving = false;
+    // Refresh updates facts for this recipe; it must not orphan a server-side
+    // first Save/Save-as that has not returned its assigned identity yet.
+    if (!options.preserveSave) { ++saveEpoch; ++saveRequest; saving = false; }
     resetBoardState();
     const loaded: BoardSymbol[] = [];
     for (const entry of value.board.symbols) {
@@ -624,7 +629,7 @@
     const token = ++epoch; const expected = fingerprint(); const wasDirty = dirty; busy = true; pendingReplacement = { id: boardId, token };
     try {
       const loaded = await adapter.resolveBoard(documentState());
-      await applyLoaded(loaded, token, expected, () => { if (!wasDirty) savedFingerprint = fingerprint(); notice = 'Index refreshed; identities re-resolved and arrangement preserved.'; });
+      await applyLoaded(loaded, token, expected, () => { if (!wasDirty) savedFingerprint = fingerprint(); notice = 'Index refreshed; identities re-resolved and arrangement preserved.'; }, { preserveSave: true });
     } catch (cause) { if (token === epoch) fail(cause); } finally { if (pendingReplacement?.token === token) pendingReplacement = null; if (token === epoch) busy = false; }
   }
   let seenIndex = live.indexTick;
