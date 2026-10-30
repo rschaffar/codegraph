@@ -186,6 +186,26 @@ describe('Board replacement and metadata request lifetimes', () => {
     expect(host.querySelector('.notice')?.textContent).not.toContain('Saved Alpha');
   });
 
+  it.each([false, true])('retains a pending first Save/Save-as binding across index refresh (asNew=%s)', async (asNew) => {
+    await render();
+    if (asNew) await open(); else { boardRequests.enqueue(['a']); await settle(); }
+    input('Board name', asNew ? 'Clone review' : 'Fresh review');
+    const pending = deferred<{ id: string; name: string; updatedAt: string }>(); calls.saveBoard.mockImplementationOnce(() => pending.promise);
+    await click(asNew ? 'Save as' : 'Save'); await click('Refresh index');
+    pending.resolve({ id: 'created', name: asNew ? 'Clone review' : 'Fresh review', updatedAt: 'now' }); await settle();
+    expect(host.querySelector('.savebar')?.textContent).not.toContain('Unsaved changes');
+    await click('Save'); expect(calls.saveBoard.mock.calls.at(-1)![0].id).toBe('created');
+  });
+
+  it('recovers keyboard focus after the last hidden row is restored, so Escape still closes the panel', async () => {
+    await render(); await open(); await click('Hide Alpha'); await click('Hidden items (1)');
+    const restore = button('Restore'); restore.focus(); restore.click(); await settle();
+    expect(document.activeElement?.closest('[aria-label="Hidden items"]')).not.toBeNull();
+    document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); await settle();
+    expect(host.querySelector('[aria-label="Hidden items"]')).toBeNull();
+    expect(host.contains(document.activeElement)).toBe(true);
+  });
+
   it('does not publish old Add completion notices after New', async () => {
     await render(); const pending = deferred<BoardSnapshot>(); let count = 0;
     calls.board.mockImplementation(async (ids) => ++count === 2 ? pending.promise : snapshot(ids));
