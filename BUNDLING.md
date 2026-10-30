@@ -83,14 +83,19 @@ of the indexed project. See [its design plan and development instructions](docs/
 
 Run `nix develop` from the checkout root. It provides the package's Node.js,
 the native build toolchain, Git and the archive tools used by the full test suite.
-On first entry it recreates root and UI workspace `node_modules` offline from
-the package's locked Nix npm cache; repeat entry skips unchanged dependencies,
-and a missing workspace dependency tree is recreated. No copied worktree state,
-manual `npm install`, ambient npm cache or global npm configuration is needed.
-Temporary writable cache copies are removed after installation. A lock/cache
-mismatch fails with guidance to update `npmDepsHash`, rather than fetching from npm.
-Nix itself may fetch its pinned inputs/tool closure on first use; `nix develop
---offline` works once those are cached.
+Nix builds the installed root/UI dependency trees independently of application
+source, using `importNpmLock` and the existing lockfile integrity hashes. First
+entry materializes writable copies of those immutable outputs; repeat entry
+reuses matching copies and a missing workspace tree is recreated. Shell entry
+runs no npm installation and copies no npm cache. Workspace links resolve to the
+editable UI sources, while the root/UI tool versions remain distinct.
+
+Unmanaged, symlinked, incomplete or old-generation dependency trees are refused,
+not overwritten. When migrating from the old bootstrap or updating dependencies,
+move the affected root/UI `node_modules` aside explicitly before re-entering.
+Nix may fetch/build its pinned inputs and dependency outputs first; `nix develop
+--offline` works once those are cached. No ambient npm cache or global npm
+configuration is used.
 
 Build outputs are recreated with the commands below. For installed-package
 changes, rebuild with `nix build`; `npm run build` in a dev shell alone does not
@@ -117,10 +122,20 @@ its own processes. It never uses a private review checkout or saves into this
 repository's index.
 
 `flake.lock`, `package-lock.json` and `codegraph-kernel/Cargo.lock` pin the build
-inputs. After changing npm dependencies, update `npmDepsHash` in
-`nix/package.nix` (temporarily use `lib.fakeHash` and take the actual hash from
-the failed dependency-fetch build). Native registry dependencies are derived
-from `Cargo.lock` without a separately maintained Cargo hash.
+inputs. There is no separately maintained `npmDepsHash`: `importNpmLock` uses the
+integrity hashes already recorded by npm. Use `nix develop .#update` to change
+manifests/lockfiles with `npm install --package-lock-only --ignore-scripts` (add
+`--workspace ui` for UI dependencies), then re-enter the default shell after
+explicitly setting aside any old dependency generation. Both the root and UI
+manifests are inputs, not flattened into one dependency set. Native registry
+dependencies are derived from `Cargo.lock` without a separate Cargo hash.
+
+The app build and tests share the development dependency output. A separate
+root-only runtime output uses the same lockfile, omits development dependencies
+and detaches the unshipped UI workspace; the installed package cannot retain the
+development-module derivation. Only npm's unused hidden installation metadata is
+removed to avoid retaining source-tarball store references; package/WASM payloads
+remain intact. `flake.nix` wires the outputs; recipes and checks live under `nix/`.
 
 The package's install checks require successful native loading and extraction,
 exercise CLI indexing/querying with native and WASM extraction, and start the
@@ -133,11 +148,15 @@ against the selected Nix runtime, not inferred from the app's version string.
 This proves runtime selection, not complete security-backport coverage: the current
 lock selects Node 24.21.0 while the bundle's minimum is 24.22.1, and that policy
 mismatch remains unverified rather than being labelled a proven vulnerability.
-These are packaging smoke tests, not
-the full test suite or browser interaction tests. A separate development-shell
-check starts without dependency trees and verifies offline bootstrap, idempotent
-re-entry, workspace recovery, manifest preservation and refusal of unrelated
-directories or mismatched locks.
+These installed checks are packaging smoke tests, not browser interaction tests.
+`nix flake check` also runs full Vitest, Svelte and reusable-library checks in a
+normal Nix sandbox with the same development dependency output. It indexes only
+its disposable source tree so the existing real-repository API regression runs,
+and includes OpenSSL for local HTTPS fixtures; it never indexes a caller project.
+A separate shell check proves preparation invokes no npm installation, preserves manifests, recovers
+a missing workspace, reuses existing copies, and refuses unrelated directories,
+mismatched manifests, unmanaged dependencies and symlinks. The runtime-module
+check verifies locked production dependencies and excludes UI/development tools.
 Linux ARM64 is exposed for native builds on that platform; exposing an output
 is not evidence that it has been built on every architecture.
 
