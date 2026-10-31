@@ -4855,6 +4855,62 @@ export class QueryBuilder {
     return (this.db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM edges').get() as { id: number }).id;
   }
 
+  /** Whether replacing this file can change AsSpan declaration eligibility. */
+  hasDotnetSpanMethod(filePath: string): boolean {
+    return this.db.prepare(`SELECT 1 FROM nodes WHERE file_path = ? AND kind = 'method'
+      AND ((language = 'csharp' AND name = 'AsSpan') OR (language = 'vbnet' AND lower(name) = 'asspan')) LIMIT 1`)
+      .get(filePath) !== undefined;
+  }
+
+  /** Bounded name-index windows, including ineligible rows so every page advances. */
+  getDotnetSpanTargetsPage(after: number, limit: number = 2000): Array<{ cursor: number; target: string | null }> {
+    return this.db.prepare(`SELECT rowid AS cursor,
+      CASE WHEN kind = 'method' AND ((language = 'csharp' AND name = 'AsSpan') OR language = 'vbnet') THEN id END AS target
+      FROM nodes INDEXED BY idx_nodes_lower_name
+      WHERE lower(name) = 'asspan' AND rowid > ? ORDER BY rowid LIMIT ?`)
+      .all(after, limit) as Array<{ cursor: number; target: string | null }>;
+  }
+
+  /** Target/kind-indexed windows; rejected calls still contribute to the cursor. */
+  getDotnetSpanCallsPage(target: string, after: number, through: number, limit: number = 2000): {
+    cursor: number;
+    edges: Array<Edge & { edgeId: number; sourceFilePath: string; sourceLanguage: Language }>;
+  } {
+    const ids = (this.db.prepare(`SELECT id FROM edges INDEXED BY idx_edges_target_kind
+      WHERE target = ? AND kind = 'calls' AND id > ? AND id <= ? ORDER BY id LIMIT ?`)
+      .all(target, after, through, limit) as Array<{ id: number }>).map((row) => row.id);
+    const edges: Array<Edge & { edgeId: number; sourceFilePath: string; sourceLanguage: Language }> = [];
+    for (let i = 0; i < ids.length; i += SQLITE_PARAM_CHUNK_SIZE) {
+      const chunk = ids.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
+      const rows = this.db.prepare(`SELECT e.*, src.file_path AS source_file_path, src.language AS source_language
+        FROM edges e CROSS JOIN nodes src ON src.id = e.source
+        WHERE e.id IN (${chunk.map(() => '?').join(',')}) AND src.language IN ('csharp', 'vbnet')
+          AND (e.provenance IS NULL OR e.provenance != 'heuristic') ORDER BY e.id`)
+        .all(...chunk) as Array<EdgeRow & { source_file_path: string; source_language: Language }>;
+      for (const row of rows) edges.push({ ...rowToEdge(row), edgeId: row.id,
+        sourceFilePath: row.source_file_path, sourceLanguage: row.source_language });
+    }
+    return { cursor: ids.at(-1) ?? after, edges };
+  }
+
+  /**
+   * One bounded failed-index window, matching any whole dotted AsSpan segment.
+   * No folded-segment index exists: scan it once per extraction phase, not once
+   * per declaration file. SQL returns only IDs, not unrelated reference text.
+   */
+  reopenFailedDotnetSpanPage(after: number, limit: number = 2000): number {
+    const rows = this.db.prepare(`WITH candidates AS MATERIALIZED (
+      SELECT id, language, reference_name FROM unresolved_refs INDEXED BY idx_unresolved_status
+      WHERE status = 'failed' AND id > ? ORDER BY id LIMIT ?
+    ) SELECT id AS cursor, CASE WHEN
+      (language = 'csharp' AND instr('.' || reference_name || '.', '.AsSpan.') > 0) OR
+      (language = 'vbnet' AND instr('.' || lower(reference_name) || '.', '.asspan.') > 0)
+      THEN id END AS ref_id FROM candidates ORDER BY id`)
+      .all(after, limit) as Array<{ cursor: number; ref_id: number | null }>;
+    this.reopenFailedReferences(rows.flatMap((row) => row.ref_id === null ? [] : [row.ref_id]));
+    return rows.at(-1)?.cursor ?? after;
+  }
+
   /**
    * Resolution edges whose TARGET symbol is named one of `names` — the edges a
    * sync must re-resolve after `names` gained or lost a definition (CG-33).

@@ -5,8 +5,6 @@ import * as path from 'path';
 import { CodeGraph } from '../src';
 import { initGrammars, loadGrammarsForLanguages } from '../src/extraction/grammars';
 import { TreeSitterExtractor } from '../src/extraction/tree-sitter';
-import { csharpExtensionReceiverType } from '../src/resolution/override-parameters';
-import type { ResolutionContext } from '../src/resolution/types';
 import { resetKernelForTests, tryKernelExtract } from '../src/extraction/kernel';
 import { isStdMethodName } from '../src/resolution/name-matcher';
 
@@ -200,19 +198,31 @@ public class Consumer {
       }
     });
 
-    it('does not treat an extension type parameter as a concrete receiver declaration', async () => {
-      const files = { 'Extensions.cs': 'namespace Example; public static class Extensions { public static int AsSpan<T>(this T value) => 1; }' };
-      const cg = await index(files);
+    it('does not use a generic receiver parameter as concrete name evidence in the live fallback', async () => {
+      const source = `using System;
+namespace Example;
+public class Consumer {
+    static int WithProperty<T>(Func<T, int> predicate) => 0;
+    public int Read() => WithProperty<string>(t => t.AsSpan());
+}`;
+      const extracted = mode === 'native'
+        ? tryKernelExtract('Consumer.cs', source, 'csharp')
+        : new TreeSitterExtractor('Consumer.cs', source, 'csharp').extract();
+      expect(extracted).not.toBeNull();
+      expect(extracted!.unresolvedReferences.filter((ref) => ref.referenceKind === 'calls' && ref.referenceName === 't.AsSpan')).toHaveLength(1);
+      const cg = await index({
+        'Extensions.cs': 'namespace Example; public static class Extensions { public static int AsSpan<T>(this T value) => 1; }',
+        'Consumer.cs': source,
+      });
       try {
-        const method = cg.getNodesByName('AsSpan').find((node) => node.kind === 'method')!;
-        // This pure declaration reader uses real graph nodes and fixture source,
-        // not a mock database or a second resolver.
-        const context = {
-          getNodesInFile: (file: string) => cg.getNodesInFile(file),
-          getFileLines: (file: string) => files[file as keyof typeof files]?.split(/\r?\n/) ?? null,
-          readFile: (file: string) => files[file as keyof typeof files] ?? null,
-        } as ResolutionContext;
-        expect(csharpExtensionReceiverType(method, context)).toBeNull();
+        const methods = cg.getNodesByName('AsSpan').filter((node) => node.kind === 'method');
+        expect(methods).toHaveLength(1);
+        expect(methods[0]!.qualifiedName).toBe('Example::Extensions::AsSpan');
+        // Deliberately conservative: the variable `t` spelling a generic `T`
+        // must not authorize this name-only guess. This exercises the actual
+        // selected-target veto, not a separate declaration-reader wrapper.
+        const sources = cg.getNodesInFile('Consumer.cs').map((node) => node.id);
+        expect(cg.getOutgoingEdgesFrom(sources).filter((edge) => edge.kind === 'calls' && edge.target === methods[0]!.id)).toEqual([]);
       } finally {
         cg.close();
       }

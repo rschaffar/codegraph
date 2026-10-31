@@ -11,6 +11,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { CodeGraph } from '../src';
+import { gateTypeParameter } from '../src/resolution/type-parameters';
+import type { ResolutionContext, UnresolvedRef } from '../src/resolution/types';
 
 const roots: string[] = [];
 afterAll(() => {
@@ -37,6 +39,31 @@ function typeTargets(cg: CodeGraph, name: string): string[] {
 }
 
 describe('type parameters', () => {
+  it.each(['java', 'csharp'] as const)('limits the new same-line column policy to C#: %s', async (language) => {
+    const file = language === 'java' ? 'Uses.java' : 'Uses.cs';
+    const source = 'class Generic<T> { } class Uses { T Read(T value) { return value; } }';
+    const cg = await project({ [file]: source, [language === 'java' ? 'T.java' : 'T.cs']: 'class T { }' });
+    try {
+      const caller = cg.getNodesByName('Read').find((node) => node.kind === 'method')!;
+      const target = cg.getNodesByName('T').find((node) => node.kind === 'class')!;
+      expect(caller).toBeDefined();
+      expect(target).toBeDefined();
+      const ref: UnresolvedRef = { fromNodeId: caller.id, referenceName: 'T', referenceKind: 'references',
+        filePath: file, language, line: 1, column: source.indexOf('T Read') };
+      const resolved = { original: ref, targetNodeId: target.id, confidence: 1, resolvedBy: 'exact-name' };
+      const context = {
+        getNodesInFile: (name: string) => cg.getNodesInFile(name),
+        getFileLines: (name: string) => name === file ? [source] : ['class T { }'],
+        readFile: (name: string) => name === file ? source : 'class T { }',
+      } as ResolutionContext;
+      // This cleanup intentionally retains the pre-existing line-only policy
+      // outside C#. Improving other languages' same-line scoping is separate.
+      expect(gateTypeParameter(resolved, ref, context)).toBe(language === 'csharp' ? resolved : null);
+    } finally {
+      cg.close();
+    }
+  });
+
   it('Scala: a def’s type parameters, and a case class local to another test', async () => {
     const cg = await project({
       'src/Inst.scala': `package app

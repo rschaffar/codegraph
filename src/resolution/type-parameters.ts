@@ -156,7 +156,7 @@ function enclosingDeclarations(at: { filePath: string; line: number; column?: nu
   return context
     .getNodesInFile(at.filePath)
     .filter((n) => DECLARATION_KINDS.has(n.kind) && n.startLine <= at.line && n.endLine >= at.line &&
-      (at.column === undefined || ((n.startLine !== at.line || n.startColumn <= at.column) &&
+      (n.language !== 'csharp' || at.column === undefined || ((n.startLine !== at.line || n.startColumn <= at.column) &&
         (n.endLine !== at.line || n.endColumn >= at.column))));
 }
 
