@@ -11,6 +11,7 @@ import { escapeRegExp, escapesRoot } from '../utils';
 import { UnresolvedRef, ResolvedRef, ResolutionContext, ImportMapping, isSupertypeTarget, CPP_DEFINE_SIGNATURE, isInheritanceRef, isImportableKind } from './types';
 import { blankStringContents, stripCommentsForRegex } from './strip-comments';
 import { isJsSuperCallSite } from './js-super-calls';
+import { csharpExtensionReceiverType } from './override-parameters';
 import { JS_ARRAY_METHODS, JS_BROWSER_HOST_GLOBALS, JS_BUILT_INS, JS_BUILTIN_METHODS, TS_PRIMITIVE_TYPES } from './js-builtins';
 import { SWIFT_TYPE_PATH_CALL, resolveSwiftTypePathCall } from './swift-type-visibility';
 import { dartImportPrefixes, dartLibrarySees, dartPrefixSees, dartPrivateVisible, inSameDartLibrary } from './dart-libraries';
@@ -6706,7 +6707,7 @@ const KOTLIN_STD_METHODS: ReadonlySet<string> = new Set([
  */
 const CSHARP_STD_METHODS: ReadonlySet<string> = new Set([
   'ToString', 'Equals', 'GetHashCode', 'GetType', 'CompareTo', 'Add', 'AddRange', 'Remove', 'RemoveAt', 'RemoveAll',
-  'Contains', 'ContainsKey', 'ContainsValue', 'Clear', 'Insert', 'IndexOf', 'CopyTo', 'ToArray', 'ToList',
+  'Contains', 'ContainsKey', 'ContainsValue', 'Clear', 'Insert', 'IndexOf', 'CopyTo', 'AsSpan', 'ToArray', 'ToList',
   'ToDictionary', 'GetEnumerator', 'MoveNext', 'Reset', 'TryGetValue', 'GetValueOrDefault', 'TryAdd', 'Write',
   'WriteLine', 'WriteAsync', 'WriteLineAsync', 'Read', 'ReadAsync', 'ReadLine', 'ReadToEnd', 'Flush', 'FlushAsync',
   'Close', 'Dispose', 'DisposeAsync', 'Parse', 'TryParse', 'Format', 'Join', 'Split', 'Replace', 'Substring', 'Trim',
@@ -6873,13 +6874,23 @@ const DART_STD_METHODS: ReadonlySet<string> = new Set([
  * aside (`id` an `ID`, `urlsMap` a `URLsMap`): a shared word is what every
  * `err` has with an `…Err` type, every `ctx` with a `valCtx`.
  */
-function receiverNamesOwner(receiver: string, method: Node, context: ResolutionContext): boolean {
+function receiverNamesOwner(receiver: string, method: Node, context: ResolutionContext, csharpType?: string | null): boolean {
   if (method.language === 'go') return namesOwnerType(receiver, method);
   // A Ruby receiver, the class that owns the method, not one of the modules
   // around it: `Sinatra::Cookies::Jar` is no `bad_cookies`.
   if (method.language === 'ruby') {
     const cut = method.qualifiedName.lastIndexOf('::');
     return cut > 0 && sharesReceiverWord(receiver, { ...method, qualifiedName: `${method.qualifiedName.slice(0, cut).split('::').pop()!}::${method.name}` });
+  }
+  // Span conversions can be project extensions, not members of their static
+  // declaring class. Preserve the old candidate only when its explicit `this`
+  // type agrees with the existing receiver inference (or owner-name evidence).
+  // Other standard names keep their existing rules, including Object members
+  // which take precedence over an extension with the same name.
+  if (method.language === 'csharp' && method.name === 'AsSpan') {
+    const type = csharpExtensionReceiverType(method, context);
+    if (csharpType) return csharpType === type;
+    if (type) return sharesReceiverWord(receiver, { ...method, qualifiedName: `${type}::${method.name}` });
   }
   if (method.language === 'dart') {
     const cut = method.qualifiedName.lastIndexOf('::');
@@ -24409,6 +24420,7 @@ export function matchMethodCall(
   // shared source-based inferrer. resolveMethodOnType validates the method
   // exists on the inferred type, so a mis-inference produces no edge.
   let localInferred = false;
+  let csharpReceiverType: string | null = null;
   // Java: what javaReceiverDeclaredType read for the receiver, once it ran.
   let javaDeclared: ReturnType<typeof javaReceiverDeclaredType> | undefined;
   // A declaration read for the receiver, so its name names no class (Strategy 2).
@@ -24611,6 +24623,7 @@ export function matchMethodCall(
       if (isUndeclaredTypeName(inferredType.split(/[.:]+/).pop()!, ref, context)) return null;
     } else if (inferredType) {
       localInferred = true;
+      if (ref.language === 'csharp') csharpReceiverType = inferredType;
       // A Go local bound from a type assertion calls a method of the type Go
       // finds for it, or nothing the project declares: `flusher.Flush()` after
       // `flusher, ok := w.(http.Flusher)` went to a project type named after it.
@@ -25262,7 +25275,7 @@ export function matchMethodCall(
         // `w.Header().Get(…)`, `reader.Value.ToString()`,
         // `options.setdefault(…)`) is the library type's.
         !(isStdMethodName(ref.language, methodName!) &&
-          !/^(?:self|Self|this|base)$/.test(objectOrClass!) && !receiverNamesOwner(receiverLink(objectOrClass!), targetMethods[0]!, context)) &&
+          !/^(?:self|Self|this|base)$/.test(objectOrClass!) && !receiverNamesOwner(receiverLink(objectOrClass!), targetMethods[0]!, context, csharpReceiverType)) &&
         !(UNTYPED_RECEIVER_LANGUAGES.has(ref.language) && !/^(?:self|self\.class|this|super|weak_?self|strong_?self)$/i.test(objectOrClass!) &&
           !sharesReceiverWord(objectOrClass!, targetMethods[0]!) &&
           !(ref.language === 'objc' && objcReceiverReaches(objectOrClass!, targetMethods[0]!, context)) &&
@@ -25307,7 +25320,7 @@ export function matchMethodCall(
       // first-indexed duplicate (#1079).
       const std = isStdMethodName(ref.language, methodName!) && !/^(?:self|Self|this|base)$/.test(objectOrClass!);
       for (const method of preferCallSiteFile(withinCppTranslationUnit(targetMethods, ref, context), ref.filePath)) {
-        if (std && !receiverNamesOwner(receiverLink(objectOrClass!), method, context)) continue;
+        if (std && !receiverNamesOwner(receiverLink(objectOrClass!), method, context, csharpReceiverType)) continue;
         // The owner type's own name — not its namespace (`eShop.ClientApp…`
         // shares `Client` with every `httpClient`) nor the method's.
         const cut = method.qualifiedName.lastIndexOf('::');

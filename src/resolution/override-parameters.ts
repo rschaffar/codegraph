@@ -218,6 +218,23 @@ function csharpParameterList(method: Node, context: ResolutionContext): string |
   return close < 0 ? null : head.slice(open + 1, close);
 }
 
+/**
+ * A static C# extension's concrete receiver type, or null when unreadable or
+ * not a simple type. This is candidate evidence, not extension lookup or a
+ * binding of generic/qualified types whose identity the caller has erased.
+ */
+export function csharpExtensionReceiverType(method: Node, context: ResolutionContext): string | null {
+  if (method.language !== 'csharp' || !method.isStatic) return null;
+  const list = csharpParameterList(method, context);
+  const first = list === null ? undefined : splitParameters(list)[0];
+  const parameter = first === undefined ? null : csharpParameter(first);
+  if (!parameter?.receiver) return null;
+  const type = parameter.type.replace(/^(?:(?:ref|in|readonly)\s+)+/, '');
+  if (!/^@?[A-Za-z_]\w*$/.test(type)) return null;
+  const name = type.replace(/^@/, '');
+  return typeParametersInScope(method, context).has(name) ? null : name;
+}
+
 /** C# source with its comments and the contents of its string and character literals blanked, newlines kept. */
 function blankCsharpTrivia(text: string): string {
   let out = '';
@@ -281,6 +298,11 @@ function parameterType(param: string, language: string): string | null | typeof 
  * which are, and before its name and default value.
  */
 function csharpParameterType(param: string): string | null {
+  return csharpParameter(param)?.type ?? null;
+}
+
+/** Read the modifiers once, preserving `this` as evidence for extension calls. */
+function csharpParameter(param: string): { type: string; receiver: boolean } | null {
   let p = param.trim();
   while (p.startsWith('[')) {
     const close = closingBracket(p, 0);
@@ -293,11 +315,13 @@ function csharpParameterType(param: string): string | null {
   if (!m) return null;
   let type = m[1]!.trim();
   const kept: string[] = [];
+  let receiver = false;
   for (let mod = /^(this|params|scoped|ref|out|in|readonly)\s+/.exec(type); mod; mod = /^(this|params|scoped|ref|out|in|readonly)\s+/.exec(type)) {
+    if (mod[1] === 'this') receiver = true;
     if (mod[1] !== 'this' && mod[1] !== 'params' && mod[1] !== 'scoped') kept.push(mod[1]!);
     type = type.slice(mod[0].length);
   }
-  return type ? [...kept, type].join(' ') : null;
+  return type ? { type: [...kept, type].join(' '), receiver } : null;
 }
 
 /**

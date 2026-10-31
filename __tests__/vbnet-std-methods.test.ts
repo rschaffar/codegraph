@@ -25,6 +25,12 @@ beforeAll(async () => {
     End Function
 End Class
 `,
+    'Buffers/SpanBuffer.vb': `Public Class SpanBuffer
+    Public Function AsSpan() As Object
+        Return Nothing
+    End Function
+End Class
+`,
     'Audio/AudioProfile.vb': `Public Class AudioProfile
     Public Function IsInputSupported(ByVal inputs As Object, ByVal ext As String) As Boolean
         For Each supported In inputs
@@ -38,6 +44,20 @@ End Class
             If script.Contains(name) Then Return True
         Next
         Return False
+    End Function
+
+    Public Function SpanFromUnknown(ByVal values As Object) As Object
+        For Each value In values
+            Return value.aSsPaN()
+        Next
+        Return Nothing
+    End Function
+
+    Public Function SpanFromOwner(ByVal values As Object) As Object
+        For Each spanBuffer In values
+            Return spanBuffer.AsSpan()
+        Next
+        Return Nothing
     End Function
 End Class
 `,
@@ -71,5 +91,13 @@ describe('VB.NET standard-library method names', () => {
 
   it('still reach the project method when the receiver names its owner', () => {
     expect(callsOf('AudioProfile::HasScript')).toEqual(['VideoScript::Contains']);
+  });
+
+  it('does not guess a span conversion on an unrelated receiver, in any case', () => {
+    expect(callsOf('AudioProfile::SpanFromUnknown')).toEqual([]);
+  });
+
+  it('preserves span methods when the receiver names their owner', () => {
+    expect(callsOf('AudioProfile::SpanFromOwner')).toEqual(['SpanBuffer::AsSpan']);
   });
 });
