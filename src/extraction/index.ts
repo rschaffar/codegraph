@@ -15,6 +15,7 @@ import {
   FileRecord,
   ExtractionResult,
   ExtractionError,
+  Node,
   Edge,
   UnresolvedReference,
 } from '../types';
@@ -3369,6 +3370,10 @@ export class ExtractionOrchestrator {
     // the unchanged-file early return so untouched files pay nothing.
     const generated = detectGeneratedFile(filePath, content);
 
+    // Queue original calls before taking the incoming-edge snapshot: otherwise
+    // identity-preserving reattachment would restore stale eligibility/metadata.
+    this.reopenDotnetSpanCalls(filePath, language, result.nodes);
+
     // Snapshot incoming cross-file edges BEFORE deleting this file's nodes.
     // `deleteFile` cascades to delete every edge whose source OR target is a
     // node in this file (edges.FK ... ON DELETE CASCADE). Edges whose SOURCE is
@@ -3762,6 +3767,27 @@ export class ExtractionOrchestrator {
     return [...moved.keys()];
   }
 
+  /**
+   * AsSpan's fallback reads declaration eligibility, not just the method name.
+   * A changed declaration can affect guesses currently bound to another same-
+   * named candidate too. Reopen only these stamped .NET calls, before replacing
+   * the file, using pending refs as the durable queue (no fingerprint baseline
+   * to lose on interruption). No general rebind ceiling/kill switch applies.
+   */
+  private reopenDotnetSpanCalls(filePath: string, language: Language, next: readonly Node[]): void {
+    if (language !== 'csharp' && language !== 'vbnet') return;
+    const span = (n: Node): boolean => n.kind === 'method' &&
+      ((n.language === 'csharp' && n.name === 'AsSpan') || (n.language === 'vbnet' && n.name.toLowerCase() === 'asspan'));
+    if (!next.some(span) && !this.queries.getNodesByFile(filePath).some(span)) return;
+    const targets = this.queries.getNodesByLowerName('asspan').filter(span);
+    const ids = new Set(targets.map((n) => n.id));
+    const names = [...new Set([...targets, ...next.filter(span)].map((n) => n.name))];
+    this.reopenEdges(this.queries.getResolutionEdgesByTargetName(names, Number.MAX_SAFE_INTEGER)
+      .filter((e) => e.kind === 'calls' && ids.has(e.target) && (e.sourceLanguage === 'csharp' || e.sourceLanguage === 'vbnet')));
+    this.queries.requeueFailedReferencesByLanguage('csharp', ['AsSpan']);
+    this.queries.requeueFailedReferencesByLanguage('vbnet', ['AsSpan']);
+  }
+
   private reopenEdges(edges: Array<Edge & { edgeId: number; sourceFilePath: string; sourceLanguage: Language }>): number {
     const edgeIds: number[] = [];
     const refs: UnresolvedReference[] = [];
@@ -3906,6 +3932,7 @@ export class ExtractionOrchestrator {
     // below (see SYNC_RECONCILE_YIELD_INTERVAL / issue #905).
     let reconcileChecks = 0;
     const removeTracked = (tracked: FileRecord): void => {
+      this.reopenDotnetSpanCalls(tracked.path, tracked.language, []);
       // Before the cascade deletes them, resurrect incoming cross-file
       // resolution edges as their original refs (#1240 removal case): the
       // callers live in files this sync will NOT revisit, so this is their

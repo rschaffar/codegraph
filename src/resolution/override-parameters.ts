@@ -17,12 +17,10 @@ import type { Node } from '../types';
 import type { ResolutionContext } from './types';
 import { typeParametersInScope } from './type-parameters';
 import { escapeRegExp } from '../utils';
+import { csharpClosingBracket, csharpDeclarationHead, csharpDeclarationNameEnd } from './csharp-declaration';
 
 /** The languages whose overrides repeat the parameter list of the method they override. */
 export const PARAMETER_OVERRIDE_LANGUAGES: ReadonlySet<string> = new Set(['java', 'kotlin', 'csharp', 'scala']);
-
-/** How far a C# declaration is read for its parameter list: attributes, then a parameter a line. */
-const CSHARP_HEAD_LINES = 40;
 
 /** C#'s keyword for each BCL type it aliases: `String key` and `string key` are one parameter type. */
 const CSHARP_KEYWORD_TYPES: Readonly<Record<string, string>> = {
@@ -194,28 +192,42 @@ function parameterList(method: Node, context: ResolutionContext): string | null 
  * IStore.Put(string key)`, is named `Put` like any other.
  */
 function csharpParameterList(method: Node, context: ResolutionContext): string | null {
-  const lines = context.getFileLines?.(method.filePath) ?? context.readFile(method.filePath)?.split(/\r?\n/) ?? null;
-  if (!lines || method.startLine < 1 || method.startLine > lines.length) return null;
-  const end = Math.min(lines.length, Math.max(method.endLine, method.startLine), method.startLine - 1 + CSHARP_HEAD_LINES);
-  const first = lines[method.startLine - 1]!;
-  const head = blankCsharpTrivia(
-    [first.slice(Math.min(method.startColumn, first.length)), ...lines.slice(method.startLine, end)].join('\n')
-  );
-  let at = 0;
-  for (;;) {
-    while (at < head.length && /\s/.test(head[at]!)) at++;
-    if (head[at] !== '[') break;
-    const close = closingBracket(head, at);
+  const head = csharpDeclarationHead(method, context);
+  if (head === null) return null;
+  const end = csharpDeclarationNameEnd(head, method);
+  if (end === null) return null;
+  let open = end;
+  while (/\s/.test(head[open] ?? '') && open < head.length) open++;
+  if (head[open] === '<') {
+    const close = csharpClosingBracket(head, open);
     if (close < 0) return null;
-    at = close + 1;
+    open = close + 1;
+    while (/\s/.test(head[open] ?? '') && open < head.length) open++;
   }
-  const name = new RegExp(`(?<![\\w@])@?${escapeRegExp(method.name)}\\s*(?:<[^<>()]*>)?\\s*\\(`, 'g');
-  name.lastIndex = at;
-  const found = name.exec(head);
-  if (!found) return null;
-  const open = found.index + found[0].length - 1;
-  const close = closingBracket(head, open);
+  if (head[open] !== '(') return null;
+  const close = csharpClosingBracket(head, open);
   return close < 0 ? null : head.slice(open + 1, close);
+}
+
+export interface CsharpParameter { name: string; type: string; receiver: boolean }
+const CSHARP_PARAMETERS = new WeakMap<ResolutionContext, Map<string, readonly CsharpParameter[] | null>>();
+
+/** Same stable-source window as ReferenceResolver's file and name caches. */
+export function clearCsharpParameterMemos(context: ResolutionContext): void {
+  CSHARP_PARAMETERS.delete(context);
+}
+
+/** Named source parameters, not a type binding; unread declarations stay unknown. */
+export function csharpMethodParameters(method: Node, context: ResolutionContext): readonly CsharpParameter[] | null {
+  if (method.language !== 'csharp') return null;
+  let memo = CSHARP_PARAMETERS.get(context);
+  if (!memo) CSHARP_PARAMETERS.set(context, (memo = new Map()));
+  if (memo.has(method.id)) return memo.get(method.id)!;
+  const list = csharpParameterList(method, context);
+  const params = list === null ? null : splitParameters(list).map(csharpParameter);
+  const result = params?.every((p): p is CsharpParameter => p !== null) ? params : null;
+  memo.set(method.id, result);
+  return result;
 }
 
 /**
@@ -225,47 +237,12 @@ function csharpParameterList(method: Node, context: ResolutionContext): string |
  */
 export function csharpExtensionReceiverType(method: Node, context: ResolutionContext): string | null {
   if (method.language !== 'csharp' || !method.isStatic) return null;
-  const list = csharpParameterList(method, context);
-  const first = list === null ? undefined : splitParameters(list)[0];
-  const parameter = first === undefined ? null : csharpParameter(first);
+  const parameter = csharpMethodParameters(method, context)?.[0];
   if (!parameter?.receiver) return null;
   const type = parameter.type.replace(/^(?:(?:ref|in|readonly)\s+)+/, '');
   if (!/^@?[A-Za-z_]\w*$/.test(type)) return null;
   const name = type.replace(/^@/, '');
   return typeParametersInScope(method, context).has(name) ? null : name;
-}
-
-/** C# source with its comments and the contents of its string and character literals blanked, newlines kept. */
-function blankCsharpTrivia(text: string): string {
-  let out = '';
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i]!;
-    if (c === '/' && (text[i + 1] === '/' || text[i + 1] === '*')) {
-      const close = text[i + 1] === '/' ? text.indexOf('\n', i) : text.indexOf('*/', i + 2);
-      const stop = close < 0 ? text.length : text[i + 1] === '/' ? close : close + 2;
-      out += text.slice(i, stop).replace(/[^\n]/g, ' ');
-      i = stop - 1;
-      continue;
-    }
-    if (c === '"' || c === "'") {
-      // `@"…"` and `$@"…"` escape a quote by doubling it; the rest by a backslash.
-      const verbatim = c === '"' && (text[i - 1] === '@' || (text[i - 2] === '@' && text[i - 1] === '$'));
-      let j = i + 1;
-      while (j < text.length) {
-        if (verbatim ? text[j] === '"' && text[j + 1] === '"' : text[j] === '\\') {
-          j += 2;
-          continue;
-        }
-        if (text[j] === c || (!verbatim && text[j] === '\n')) break;
-        j++;
-      }
-      out += c + text.slice(i + 1, j).replace(/[^\n]/g, ' ') + (text[j] ?? '');
-      i = j;
-      continue;
-    }
-    out += c;
-  }
-  return out;
 }
 
 /** A parameter that is no parameter: Java's receiver, `void m(Foo this, int x)`. */
@@ -302,7 +279,7 @@ function csharpParameterType(param: string): string | null {
 }
 
 /** Read the modifiers once, preserving `this` as evidence for extension calls. */
-function csharpParameter(param: string): { type: string; receiver: boolean } | null {
+function csharpParameter(param: string): CsharpParameter | null {
   let p = param.trim();
   while (p.startsWith('[')) {
     const close = closingBracket(p, 0);
@@ -311,7 +288,7 @@ function csharpParameter(param: string): { type: string; receiver: boolean } | n
   }
   const assign = topLevelIndex(p, (i) => p[i] === '=' && !/[=!<>]/.test(p[i - 1] ?? '') && !/[=>]/.test(p[i + 1] ?? ''));
   if (assign >= 0) p = p.slice(0, assign).trim();
-  const m = /^([\s\S]*?\S)\s+@?[A-Za-z_]\w*$/.exec(p);
+  const m = /^([\s\S]*?\S)\s+(@?[A-Za-z_]\w*)$/.exec(p);
   if (!m) return null;
   let type = m[1]!.trim();
   const kept: string[] = [];
@@ -321,7 +298,7 @@ function csharpParameter(param: string): { type: string; receiver: boolean } | n
     if (mod[1] !== 'this' && mod[1] !== 'params' && mod[1] !== 'scoped') kept.push(mod[1]!);
     type = type.slice(mod[0].length);
   }
-  return type ? { type: [...kept, type].join(' '), receiver } : null;
+  return type ? { name: m[2]!.replace(/^@/, ''), type: [...kept, type].join(' '), receiver } : null;
 }
 
 /**
