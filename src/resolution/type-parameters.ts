@@ -17,6 +17,7 @@
 import type { Node } from '../types';
 import type { ResolutionContext, ResolvedRef, UnresolvedRef } from './types';
 import { escapeRegExp } from '../utils';
+import { csharpDeclarationHead, csharpDeclarationNameEnd } from './csharp-declaration';
 
 const GENERIC_LANGUAGES: ReadonlySet<string> = new Set([
   'scala', 'java', 'kotlin', 'csharp', 'typescript', 'tsx', 'swift', 'rust', 'dart', 'go', 'cpp', 'vbnet', 'arkts',
@@ -34,10 +35,12 @@ const DECLARATION_KINDS: ReadonlySet<string> = new Set([
 const HEAD_LINES = 40;
 
 const memos = new WeakMap<ResolutionContext, Map<string, ReadonlyMap<string, string | undefined>>>();
+const scopeMemos = new WeakMap<ResolutionContext, Map<string, ReadonlySet<string>>>();
 
 /** Drop the memos (see ReferenceResolver.clearCaches). */
 export function clearTypeParameterMemos(context: ResolutionContext): void {
   memos.delete(context);
+  scopeMemos.delete(context);
   valueMemos.delete(context);
 }
 
@@ -149,10 +152,12 @@ function scalaMemberInScope(result: ResolvedRef, ref: UnresolvedRef, context: Re
   return /^[A-Za-z_]\w*$/.test(owner.name) && /^[A-Za-z_]\w*$/.test(target.name) ? imports.test(text) : true;
 }
 
-function enclosingDeclarations(at: { filePath: string; line: number }, context: ResolutionContext): Node[] {
+function enclosingDeclarations(at: { filePath: string; line: number; column?: number }, context: ResolutionContext): Node[] {
   return context
     .getNodesInFile(at.filePath)
-    .filter((n) => DECLARATION_KINDS.has(n.kind) && n.startLine <= at.line && n.endLine >= at.line);
+    .filter((n) => DECLARATION_KINDS.has(n.kind) && n.startLine <= at.line && n.endLine >= at.line &&
+      (at.column === undefined || ((n.startLine !== at.line || n.startColumn <= at.column) &&
+        (n.endLine !== at.line || n.endColumn >= at.column))));
 }
 
 /**
@@ -161,10 +166,16 @@ function enclosingDeclarations(at: { filePath: string; line: number }, context: 
  * class's (`interface Repository<T>`), an enclosing class's.
  */
 export function typeParametersInScope(node: Node, context: ResolutionContext): ReadonlySet<string> {
+  let memo = scopeMemos.get(context);
+  if (!memo) scopeMemos.set(context, (memo = new Map()));
+  const hit = memo.get(node.id);
+  if (hit) return hit;
   const names = new Set<string>();
-  for (const declaration of enclosingDeclarations({ filePath: node.filePath, line: node.startLine }, context)) {
+  for (const declaration of enclosingDeclarations({ filePath: node.filePath, line: node.startLine,
+    column: node.language === 'csharp' ? node.startColumn : undefined }, context)) {
     for (const name of declaredTypeParameters(declaration, context).keys()) names.add(name);
   }
+  memo.set(node.id, names);
   return names;
 }
 
@@ -178,6 +189,17 @@ function declaredTypeParameters(node: Node, context: ResolutionContext): Readonl
   const hit = memo.get(node.id);
   if (hit) return hit;
   const names = new Map<string, string | undefined>();
+  if (node.language === 'csharp') {
+    const head = csharpDeclarationHead(node, context, HEAD_LINES);
+    const end = head === null ? null : csharpDeclarationNameEnd(head, node);
+    if (head !== null && end !== null) {
+      let open = end;
+      while (/\s/.test(head[open] ?? '') && open < head.length) open++;
+      if (head[open] === '<') collect(head, open, names);
+    }
+    memo.set(node.id, names);
+    return names;
+  }
   const lines = context.getFileLines?.(node.filePath) ?? context.readFile(node.filePath)?.split(/\r?\n/) ?? null;
   if (lines) {
     const head = lines.slice(node.startLine - 1, Math.min(node.endLine, node.startLine - 1 + HEAD_LINES)).join('\n');

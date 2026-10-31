@@ -1338,7 +1338,12 @@ function extensionFor(
     return { original: ref, targetNodeId: target.id, confidence: 0.85, resolvedBy: 'instance-method' };
   }
   const loose = extensions.filter((e) => e.param === null || mayExtend(t, open, e.param));
-  if (loose.length === 1 && (instanceMethods !== undefined || !isStdMethod(method))) {
+  // AsSpan is a library extension, not an Object instance member: an explicit
+  // generic project extension remains applicable to a typed receiver even when
+  // its type has no BCL method table. Unknown/late-bound receivers never reach
+  // this path, and unrelated concrete extensions still need the checks above.
+  const genericSpan = method.toLowerCase() === 'asspan' && loose[0]?.param === null;
+  if (loose.length === 1 && (instanceMethods !== undefined || !isStdMethod(method) || genericSpan)) {
     return { original: ref, targetNodeId: loose[0]!.node.id, confidence: 0.7, resolvedBy: 'instance-method' };
   }
   return null;

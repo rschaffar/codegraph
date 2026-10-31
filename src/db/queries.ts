@@ -5166,13 +5166,14 @@ export class QueryBuilder {
     if (!segments) return this.db.prepare(sql).run(language).changes;
     if (segments.length === 0) return 0;
     // One read of the parked rows, matched here, then an update by id.
-    const wanted = new Set(segments);
+    const key = (name: string): string => language === 'vbnet' ? name.toLowerCase() : name;
+    const wanted = new Set(segments.map(key));
     const ids = (
       this.db
         .prepare("SELECT id, reference_name, file_path FROM unresolved_refs WHERE status = 'failed' AND language = ?")
         .all(language) as Array<{ id: number; reference_name: string; file_path: string }>
     )
-      .filter((r) => r.reference_name.split('.').some((seg) => wanted.has(seg)))
+      .filter((r) => r.reference_name.split('.').some((seg) => wanted.has(key(seg))))
       .map((r) => {
         files?.add(r.file_path);
         return r.id;

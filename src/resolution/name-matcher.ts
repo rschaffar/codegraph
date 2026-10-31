@@ -11,7 +11,9 @@ import { escapeRegExp } from '../utils';
 import { UnresolvedRef, ResolvedRef, ResolutionContext, ImportMapping, isSupertypeTarget, CPP_DEFINE_SIGNATURE, isInheritanceRef, isImportableKind } from './types';
 import { blankStringContents, stripCommentsForRegex } from './strip-comments';
 import { isJsSuperCallSite } from './js-super-calls';
-import { csharpExtensionReceiverType } from './override-parameters';
+import { clearCsharpParameterMemos, csharpMethodParameters } from './override-parameters';
+import { blankCsharpTrivia, csharpClosingBracket, csharpDeclarationHead, csharpDeclarationNameEnd } from './csharp-declaration';
+import { typeParametersInScope } from './type-parameters';
 import { JS_ARRAY_METHODS, JS_BUILT_INS, JS_BUILTIN_METHODS, TS_PRIMITIVE_TYPES } from './js-builtins';
 import { SWIFT_TYPE_PATH_CALL, resolveSwiftTypePathCall } from './swift-type-visibility';
 import { dartImportPrefixes, dartLibrarySees, dartPrefixSees, dartPrivateVisible, inSameDartLibrary } from './dart-libraries';
@@ -6037,18 +6039,8 @@ const DART_STD_METHODS: ReadonlySet<string> = new Set([
  * aside (`id` an `ID`, `urlsMap` a `URLsMap`): a shared word is what every
  * `err` has with an `…Err` type, every `ctx` with a `valCtx`.
  */
-function receiverNamesOwner(receiver: string, method: Node, context: ResolutionContext, csharpType?: string | null): boolean {
+function receiverNamesOwner(receiver: string, method: Node, context: ResolutionContext): boolean {
   if (method.language === 'go') return namesOwnerType(receiver, method);
-  // Span conversions can be project extensions, not members of their static
-  // declaring class. Preserve the old candidate only when its explicit `this`
-  // type agrees with the existing receiver inference (or owner-name evidence).
-  // Other standard names keep their existing rules, including Object members
-  // which take precedence over an extension with the same name.
-  if (method.language === 'csharp' && method.name === 'AsSpan') {
-    const type = csharpExtensionReceiverType(method, context);
-    if (csharpType) return csharpType === type;
-    if (type) return sharesReceiverWord(receiver, { ...method, qualifiedName: `${type}::${method.name}` });
-  }
   if (method.language === 'dart') {
     const cut = method.qualifiedName.lastIndexOf('::');
     const owner = cut > 0 ? method.qualifiedName.slice(0, cut).split('::').pop()! : '';
@@ -6058,6 +6050,224 @@ function receiverNamesOwner(receiver: string, method: Node, context: ResolutionC
     if (on) return sharesReceiverWord(receiver, { ...method, qualifiedName: `${on.replace(/[<>, ?]+/g, '')}::${method.name}` });
   }
   return sharesReceiverWord(receiver, method);
+}
+
+/** Full source spelling where available; shared inference otherwise supplies only a partial name. */
+interface CsharpSpanReceiver { written: string; partial: boolean }
+
+function csharpSpanShape(written: string): { full: string; stem: string; args: string; array: boolean; ranks: string; nullable: boolean; elementNullable: boolean } {
+  const full = written.replace(/^(?:(?:ref|in|out|readonly|scoped)\s+)+/, '').replace(/\s|@/g, '').replace(/^global::/, '');
+  let stem = '';
+  let args = '';
+  let depth = 0;
+  let array = false;
+  let ranks = '';
+  let elementNullable = false;
+  for (const ch of full) {
+    if (ch === '<') depth++;
+    if (depth) args += ch;
+    else if (ch === '[') { array = true; ranks += ch; }
+    else if (array && '],['.includes(ch)) ranks += ch;
+    else if (ch === '?' && !array) elementNullable = true;
+    else if (!'[?,]*&'.includes(ch) && ch !== ']') stem += ch;
+    if (ch === '>') depth--;
+  }
+  return { full, stem: stem.split('.').pop()!, args, array, ranks, nullable: full.endsWith('?'), elementNullable };
+}
+
+function csharpSpanOwners(name: string, context: ResolutionContext): Node[] {
+  return [...context.getNodesByName(name), ...context.getNodesByName(`@${name}`)]
+    .filter((n) => n.language === 'csharp' && MEMBER_CLASS_KINDS.has(n.kind));
+}
+
+const CSHARP_SPAN_MEMBERS = new WeakMap<ResolutionContext, Map<string, string | null>>();
+const CSHARP_SPAN_BODIES = new WeakMap<ResolutionContext, Map<string, string | null>>();
+const CSHARP_SPAN_LOCALS = new WeakMap<ResolutionContext, Map<string, string | null>>();
+
+function csharpTypeParts(types: string): string[] {
+  let depth = 0;
+  let start = 0;
+  const parts: string[] = [];
+  for (let i = 0; i < types.length; i++) {
+    const ch = types[i]!;
+    if ('<(['.includes(ch)) depth++;
+    else if ('>)]'.includes(ch)) depth--;
+    else if (ch === ',' && depth === 0) { parts.push(types.slice(start, i).trim()); start = i + 1; }
+  }
+  parts.push(types.slice(start).trim());
+  return parts.filter(Boolean);
+}
+
+/** Only donors of the written arity/qualification, never a namesake's property. */
+function csharpSpanMemberOwners(written: string, context: ResolutionContext): Node[] {
+  const shape = csharpSpanShape(written);
+  if (shape.array) return [];
+  const args = shape.args ? csharpTypeParts(shape.args.slice(1, -1)).length : 0;
+  const qualified = shape.full.replace(/<.*|\?.*/g, '');
+  return csharpSpanOwners(shape.stem, context).filter((owner) => {
+    if (qualified.includes('.') && owner.qualifiedName.replace(/::/g, '.').replace(/@/g, '') !== qualified) return false;
+    const head = csharpDeclarationHead(owner, context, 8);
+    const end = head === null ? null : csharpDeclarationNameEnd(head, owner);
+    if (head === null || end === null) return false;
+    const tail = head.slice(end).trimStart();
+    const declared = tail.startsWith('<') ? angleArguments(tail).length : 0;
+    return declared === args;
+  });
+}
+
+function csharpSpanBases(owner: Node, context: ResolutionContext): string[] {
+  const head = csharpDeclarationHead(owner, context, 8);
+  const end = head === null ? null : csharpDeclarationNameEnd(head, owner);
+  let tail = head === null || end === null ? '' : head.slice(end).trimStart();
+  while (tail.startsWith('<') || tail.startsWith('(')) {
+    const close = csharpClosingBracket(tail, 0);
+    if (close < 0) return [];
+    tail = tail.slice(close + 1).trimStart();
+  }
+  return csharpTypeParts(tail.startsWith(':') ? tail.slice(1).split('{')[0]!.replace(/\bwhere\b[\s\S]*$/, '') : '');
+}
+
+/** Read an indexed field/property declaration, never a method parameter with its name. */
+function csharpSpanMember(written: string, name: string, context: ResolutionContext): string | null {
+  let memo = CSHARP_SPAN_MEMBERS.get(context);
+  if (!memo) CSHARP_SPAN_MEMBERS.set(context, (memo = new Map()));
+  const key = `${written}|${name}`;
+  if (memo.has(key)) return memo.get(key)!;
+  const initial = csharpSpanMemberOwners(written, context);
+  const queue = new Set(initial);
+  const seen = new Set<string>();
+  let result: string | null = null;
+  if (new Set(initial.map((n) => n.qualifiedName)).size === 1) for (const owner of queue) {
+    if (seen.has(owner.id) || seen.size >= 8) continue;
+    seen.add(owner.id);
+    const members = context.getNodesInFile(owner.filePath).filter((n) => n.language === 'csharp' &&
+      (n.kind === 'property' || n.kind === 'field') && n.name.replace(/^@/, '') === name.replace(/^@/, '') &&
+      n.qualifiedName.slice(0, n.qualifiedName.lastIndexOf('::')) === owner.qualifiedName &&
+      n.startLine >= owner.startLine && n.endLine <= owner.endLine &&
+      (n.startLine !== owner.startLine || n.startColumn >= owner.startColumn) &&
+      (n.endLine !== owner.endLine || n.endColumn <= owner.endColumn));
+    if (members.length) {
+      if (members.length === 1) {
+        const member = members[0]!;
+        // Fields' nodes span the variable declarator; their AST-derived
+        // signature carries the type even in a multi-declarator statement.
+        const head = member.kind === 'field' && member.signature ? blankCsharpTrivia(member.signature) : csharpDeclarationHead(member, context);
+        const match = head && new RegExp(`(?:^|\\s)(${CSHARP_SOURCE_TYPE})\\s+@?${escapeRegExp(name.replace(/^@/, ''))}\\s*(?=$|[=;{])`).exec(head);
+        if (match && !typeParametersInScope(member, context).has(csharpSpanShape(match[1]!).stem)) result = match[1]!.trim();
+      }
+      break; // A hidden/unread own member is not a base member.
+    }
+    for (const base of csharpSpanBases(owner, context)) {
+      const next = csharpSpanMemberOwners(base, context);
+      if (new Set(next.map((n) => n.qualifiedName)).size === 1) for (const n of next) queue.add(n);
+    }
+  }
+  memo.set(key, result);
+  return result;
+}
+
+/** Read the actual caller's parameters, not another occurrence of a variable in the file. */
+function csharpSpanReceiver(receiver: string, ref: UnresolvedRef, context: ResolutionContext, inferred: string | null): CsharpSpanReceiver | null {
+  const direct = context.getNodeById?.(ref.fromNodeId);
+  const methods = direct?.kind === 'method' ? [direct] : context.getNodesInFile(ref.filePath).filter((n) => n.language === 'csharp' &&
+    (n.kind === 'method' || n.kind === 'function') && n.startLine <= ref.line && n.endLine >= ref.line &&
+    (n.startLine !== ref.line || n.startColumn <= ref.column) && (n.endLine !== ref.line || n.endColumn >= ref.column))
+    .sort((a, b) => b.startLine - a.startLine || b.startColumn - a.startColumn);
+  const parts = receiver.split('.');
+  const root = parts[0]!.replace(/^@/, '');
+  const parameter = methods.map((m) => csharpMethodParameters(m, context)?.find((p) => p.name === root)).find(Boolean);
+  if (parts.length === 1 && parameter) return { written: parameter.type, partial: false };
+  // One typed root/member hop reuses the existing class-member reader. No
+  // global property-name search or arbitrary expression-chain binding.
+  if (parts.length === 2 && /^[A-Za-z_]\w*$/.test(root)) {
+    const type = parameter?.type ?? csharpSpanReceiver(root, ref, context, inferLocalReceiverType(root, ref, context))?.written;
+    if (type) {
+      const member = csharpSpanMember(type, parts[1]!, context);
+      if (member) return { written: member, partial: false };
+    }
+  }
+  if (inferred && parts.length === 1) {
+    const owner = methods[0];
+    let locals = CSHARP_SPAN_LOCALS.get(context);
+    if (!locals) CSHARP_SPAN_LOCALS.set(context, (locals = new Map()));
+    const key = `${owner?.id}|${root}|${inferred}`;
+    if (locals.has(key)) {
+      const written = locals.get(key);
+      return written ? { written, partial: false } : { written: inferred, partial: true };
+    }
+    let bodies = CSHARP_SPAN_BODIES.get(context);
+    if (!bodies) CSHARP_SPAN_BODIES.set(context, (bodies = new Map()));
+    if (owner && !bodies.has(owner.id)) bodies.set(owner.id, csharpDeclarationHead(owner, context, owner.endLine - owner.startLine + 1));
+    const head = owner ? bodies.get(owner.id) : null;
+    if (head) {
+      const r = escapeRegExp(root);
+      const typed = new RegExp(`(?:^|[;{}(,])\\s*(?:ref\\s+)?(${CSHARP_SOURCE_TYPE})\\s+@?${r}\\b\\s*(?=[=;,)])`, 'g');
+      const constructed = new RegExp(`\\bvar\\s+@?${r}\\s*=\\s*new\\s+(${CSHARP_SOURCE_TYPE})(?=\\s*[(\\[{])`, 'g');
+      // The shared inferrer already selected a local binding. Preserve its
+      // complete spelling only when the declaration agrees with that answer.
+      const found = [...head.matchAll(typed), ...head.matchAll(constructed)]
+        .filter((m) => csharpSpanShape(m[1]!).stem === csharpSpanShape(inferred).stem);
+      if (found.length === 1) {
+        locals.set(key, found[0]![1]!);
+        return { written: found[0]![1]!, partial: false };
+      }
+    }
+    locals.set(key, null);
+  }
+  return inferred ? { written: inferred, partial: true } : null;
+}
+
+/** Compatibility can preserve a prior guess; it never ranks or selects another target. */
+function csharpSpanTypesAgree(actual: CsharpSpanReceiver, expected: string, context: ResolutionContext): boolean {
+  const a = csharpSpanShape(actual.written);
+  const b = csharpSpanShape(expected);
+  if (a.full === b.full) return true;
+  if (a.ranks !== b.ranks) return false;
+  if (a.array && a.elementNullable !== b.elementNullable && csharpSpanOwners(a.stem, context).some((n) => n.kind === 'struct')) return false;
+  if (a.stem === b.stem) {
+    if (!actual.partial && a.args !== b.args) return false;
+    // Nullable annotations on reference types do not change identity. A
+    // nullable value cannot be unwrapped to a nonnullable struct implicitly.
+    if (a.nullable && !b.nullable && !a.array && csharpSpanOwners(a.stem, context).some((n) => n.kind === 'struct')) return false;
+    // Explicit contradictory qualifications are not erased into an identity.
+    const qualified = (s: string) => s.replace(/<.*|\[.*|\?.*/g, '');
+    if (!actual.partial && qualified(a.full).includes('.') && qualified(b.full).includes('.') && qualified(a.full) !== qualified(b.full)) return false;
+    return true;
+  }
+  if (a.array || (a.nullable && csharpSpanOwners(a.stem, context).some((n) => n.kind === 'struct'))) return false;
+  const owners = csharpSpanMemberOwners(actual.written, context);
+  if (new Set(owners.map((n) => n.qualifiedName)).size !== 1) return false;
+  const queue = [...owners];
+  const seen = new Set<string>();
+  while (queue.length && seen.size < 8) {
+    const owner = queue.shift()!;
+    if (seen.has(owner.id)) continue;
+    seen.add(owner.id);
+    for (const sup of csharpSpanBases(owner, context)) {
+      const shape = csharpSpanShape(sup);
+      if (shape.stem === b.stem && csharpSpanTypesAgree({ written: sup, partial: false }, expected, context)) return true;
+      const next = csharpSpanMemberOwners(sup, context);
+      if (new Set(next.map((n) => n.qualifiedName)).size === 1) queue.push(...next);
+    }
+  }
+  return false;
+}
+
+/** Veto only the original winner: a rejected guess must not promote a runner-up. */
+function acceptsCsharpSpanGuess(target: Node, receiver: string, ref: UnresolvedRef, context: ResolutionContext, inferred: string | null): boolean {
+  if (/^(?:this|base)$/.test(receiver)) return true;
+  const actual = csharpSpanReceiver(receiver, ref, context, inferred);
+  if (target.isStatic) {
+    const first = csharpMethodParameters(target, context)?.[0];
+    if (!first?.receiver) return false;
+    const expected = first.type.replace(/^(?:(?:ref|in|readonly)\s+)+/, '');
+    const shape = csharpSpanShape(expected);
+    if (typeParametersInScope(target, context).has(shape.stem)) return false;
+    return actual ? csharpSpanTypesAgree(actual, expected, context)
+      : sharesReceiverWord(receiverLink(receiver), { ...target, qualifiedName: `${shape.stem}::${target.name}` });
+  }
+  const owner = target.qualifiedName.slice(0, target.qualifiedName.lastIndexOf('::')).split('::').pop();
+  return actual && owner ? csharpSpanTypesAgree(actual, owner, context) : receiverNamesOwner(receiverLink(receiver), target, context);
 }
 
 /**
@@ -19235,6 +19445,7 @@ export function arrayElementType(type: string): string | undefined {
  * ranks, as a regex source: `<L, R>`, `<string, List<int>>`, `[]`, `[,]`.
  */
 const TYPE_ARGS = '(?:<[^;=(){}<>]*(?:<[^;=(){}<>]*>[^;=(){}<>]*)*>)?\\s*(?:\\[[\\s,]*\\]\\s*)*';
+const CSHARP_SOURCE_TYPE = '(?:global::)?@?[A-Za-z_]\\w*(?:\\s*\\.\\s*@?[A-Za-z_]\\w*)*\\s*(?:<[^;=(){}<>]*(?:<[^;=(){}<>]*>[^;=(){}<>]*)*>)?\\s*\\??(?:\\s*\\[[\\s,]*\\]\\s*\\??)*';
 
 /**
  * A Swift constructor call's argument list that no member follows: closed on
@@ -19301,6 +19512,10 @@ function getInferScanStates(context: ResolutionContext): Map<string, InferScanSt
 
 /** Drop the per-context scan states (see ReferenceResolver.clearCaches). */
 export function clearNameMatcherMemos(context: ResolutionContext): void {
+  clearCsharpParameterMemos(context);
+  CSHARP_SPAN_MEMBERS.delete(context);
+  CSHARP_SPAN_BODIES.delete(context);
+  CSHARP_SPAN_LOCALS.delete(context);
   INFER_SCAN_STATES.delete(context);
   PYTHON_MEMBER_LINES.delete(context);
   PYTHON_STATEMENT_STARTS.delete(context);
@@ -19949,7 +20164,9 @@ function classHeadSupertypes(cls: Node, context: ResolutionContext): string[] {
   const lines = context.getFileLines?.(cls.filePath) ?? context.readFile(cls.filePath)?.split(/\r?\n/) ?? [];
   let depth = 0;
   let head = '';
-  for (const ch of lines.slice(cls.startLine - 1, cls.startLine + 8).join(' ').replace(/\/\/[^\n]*|\/\*.*?\*\//g, ' ')) {
+  const source = cls.language === 'csharp' ? csharpDeclarationHead(cls, context, 8) ?? ''
+    : lines.slice(cls.startLine - 1, cls.startLine + 8).join(' ').replace(/\/\/[^\n]*|\/\*.*?\*\//g, ' ');
+  for (const ch of source) {
     if (ch === '{' && depth === 0) break;
     if (ch === '<' || ch === '(') depth++;
     else if (ch === '>' || ch === ')') depth = Math.max(0, depth - 1);
@@ -21114,6 +21331,7 @@ export function matchMethodCall(
   // exists on the inferred type, so a mis-inference produces no edge.
   let localInferred = false;
   let csharpReceiverType: string | null = null;
+  const csharpSpan = ref.language === 'csharp' && methodName === 'AsSpan';
   // Java: what javaReceiverDeclaredType read for the receiver, once it ran.
   let javaDeclared: ReturnType<typeof javaReceiverDeclaredType> | undefined;
   if (inferableReceiver) {
@@ -21910,8 +22128,8 @@ export function matchMethodCall(
         // standard-library method name on an untyped receiver (`sym.map(…)`,
         // `w.Header().Get(…)`, `reader.Value.ToString()`,
         // `options.setdefault(…)`) is the library type's.
-        !(isStdMethodName(ref.language, methodName!) &&
-          !/^(?:self|Self|this|base)$/.test(objectOrClass!) && !receiverNamesOwner(receiverLink(objectOrClass!), targetMethods[0]!, context, csharpReceiverType)) &&
+        !(!csharpSpan && isStdMethodName(ref.language, methodName!) &&
+          !/^(?:self|Self|this|base)$/.test(objectOrClass!) && !receiverNamesOwner(receiverLink(objectOrClass!), targetMethods[0]!, context)) &&
         !(UNTYPED_RECEIVER_LANGUAGES.has(ref.language) && !/^(?:self|self\.class|this|super|weak_?self|strong_?self)$/i.test(objectOrClass!) &&
           !sharesReceiverWord(objectOrClass!, targetMethods[0]!) &&
           !(ref.language === 'objc' && objcReceiverReaches(objectOrClass!, targetMethods[0]!, context)) &&
@@ -21945,9 +22163,9 @@ export function matchMethodCall(
       // Same-file candidates first, so a score tie (`score > bestScore` keeps
       // the first seen) resolves to the call site's own file rather than the
       // first-indexed duplicate (#1079).
-      const std = isStdMethodName(ref.language, methodName!) && !/^(?:self|Self|this|base)$/.test(objectOrClass!);
+      const std = !csharpSpan && isStdMethodName(ref.language, methodName!) && !/^(?:self|Self|this|base)$/.test(objectOrClass!);
       for (const method of preferCallSiteFile(withinCppTranslationUnit(targetMethods, ref, context), ref.filePath)) {
-        if (std && !receiverNamesOwner(receiverLink(objectOrClass!), method, context, csharpReceiverType)) continue;
+        if (std && !receiverNamesOwner(receiverLink(objectOrClass!), method, context)) continue;
         // The owner type's own name — not its namespace (`eShop.ClientApp…`
         // shares `Client` with every `httpClient`) nor the method's.
         const cut = method.qualifiedName.lastIndexOf('::');
@@ -22014,7 +22232,10 @@ export function matchMethodCall(
     }
     return null;
     });
-    if (strat3) return strat3;
+    if (strat3) {
+      const target = csharpSpan ? context.getNodeById?.(strat3.targetNodeId) : null;
+      return !csharpSpan || (target && acceptsCsharpSpanGuess(target, objectOrClass!, ref, context, csharpReceiverType)) ? strat3 : null;
+    }
   }
 
   return null;
