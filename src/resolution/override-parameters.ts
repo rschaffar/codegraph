@@ -61,19 +61,6 @@ export function overrideFilter(context: ResolutionContext): (base: Node, methods
     }
     return found;
   };
-  // Asked of a base method only: an override's own type parameter facing a
-  // concrete type of the base is no override in these languages (`<A> A
-  // appendTo(A, …)` does not override `appendTo(StringBuilder, …)`), and the
-  // overrides of one base sit in many files that would each be read.
-  const scopes = new Map<string, ReadonlySet<string>>();
-  const scopeOf = (m: Node): ReadonlySet<string> => {
-    let found = scopes.get(m.id);
-    if (!found) {
-      found = typeParametersInScope(m, context);
-      scopes.set(m.id, found);
-    }
-    return found;
-  };
   return (base, methods) => {
     const want = PARAMETER_OVERRIDE_LANGUAGES.has(base.language) ? typesOf(base) : null;
     if (!want) return [...methods];
@@ -92,7 +79,7 @@ export function overrideFilter(context: ResolutionContext): (base: Node, methods
       }
       let fit: Fit = 'same';
       for (let i = 0; i < want.length && fit !== 'differs'; i++) {
-        const f = compareTypes(want[i]!, () => scopeOf(base), have[i]!, base.language);
+        const f = compareTypes(want[i]!, () => typeParametersInScope(base, context), have[i]!, base.language);
         if (f !== 'same') fit = f;
       }
       if (fit === 'same') same.push(m);
@@ -228,21 +215,6 @@ export function csharpMethodParameters(method: Node, context: ResolutionContext)
   const result = params?.every((p): p is CsharpParameter => p !== null) ? params : null;
   memo.set(method.id, result);
   return result;
-}
-
-/**
- * A static C# extension's concrete receiver type, or null when unreadable or
- * not a simple type. This is candidate evidence, not extension lookup or a
- * binding of generic/qualified types whose identity the caller has erased.
- */
-export function csharpExtensionReceiverType(method: Node, context: ResolutionContext): string | null {
-  if (method.language !== 'csharp' || !method.isStatic) return null;
-  const parameter = csharpMethodParameters(method, context)?.[0];
-  if (!parameter?.receiver) return null;
-  const type = parameter.type.replace(/^(?:(?:ref|in|readonly)\s+)+/, '');
-  if (!/^@?[A-Za-z_]\w*$/.test(type)) return null;
-  const name = type.replace(/^@/, '');
-  return typeParametersInScope(method, context).has(name) ? null : name;
 }
 
 /** A parameter that is no parameter: Java's receiver, `void m(Foo this, int x)`. */

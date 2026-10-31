@@ -19,6 +19,58 @@ public class Consumer { public int Read(${type} ${receiver}) => ${receiver}.AsSp
 const extension = (type: string) => `namespace Example;
 public static class Extensions { public static int AsSpan(this ${type} value) => 42; }`;
 const fixtures: Fixture[] = [
+  ...[
+    { actual: 'left.Payload', namespace: 'left', other: 'right' },
+    { actual: 'Left . Payload', namespace: 'Left', other: 'Right' },
+  ].flatMap((f) => [false, true].map((matches): Fixture => ({
+    name: `${f.actual} explicit local retains complete qualification (${matches ? 'matches' : 'contradicts'})`,
+    files: {
+      'Left.cs': `namespace ${f.namespace}; public class Payload { }`,
+      'Right.cs': `namespace ${f.other}; public class Payload { }`,
+      'Extensions.cs': extension(`${matches ? f.namespace : f.other}.Payload`),
+      'Consumer.cs': `namespace Example; public class Consumer { public int Read() { ${f.actual} dataValue = default; return dataValue.AsSpan(); } }`,
+    }, target: matches ? 'Extensions.cs' : null, candidates: 1,
+  }))),
+  ...[
+    { name: 'generic', types: 'public class Payload<T> { }', initializer: 'new Payload<string>()', actual: 'Payload<string>', wrong: 'Payload<int>' },
+    { name: 'nullable', types: 'public struct Payload { }', initializer: 'new Payload?()', actual: 'Payload?', wrong: 'Payload' },
+    { name: 'array rank', types: 'public class Payload { }', initializer: 'new Payload[,] { { new Payload() } }', actual: 'Payload[,]', wrong: 'Payload[]' },
+  ].flatMap((f) => [false, true].map((matches): Fixture => ({
+    name: `split-line var retains ${f.name} spelling (${matches ? 'matches' : 'contradicts'})`,
+    files: {
+      'Types.cs': `namespace Example; ${f.types}`,
+      'Extensions.cs': extension(matches ? f.actual : f.wrong),
+      'Consumer.cs': `namespace Example; public class Consumer { public int Read() { var\n dataValue = ${f.initializer}; return dataValue.AsSpan(); } }`,
+    }, target: matches ? 'Extensions.cs' : null, candidates: 1,
+  }))),
+  ...[
+    { name: 'explicit generic', types: 'public class Payload<T> { }', local: 'Payload<int> dataValue = default;', assigned: 'new Payload<int>()', actual: 'Payload<int>', wrong: 'Payload<string>' },
+    { name: 'static base rather than constructed subtype', types: 'public class Payload { } public class Payload<T> : Payload { }', local: 'Payload dataValue = default;', assigned: 'new Payload<int>()', actual: 'Payload', wrong: 'Payload<int>' },
+    { name: 'previous var', types: 'public class Payload<T> { }', local: 'var dataValue = new Payload<int>();', assigned: 'new Payload<int>()', actual: 'Payload<int>', wrong: 'Payload<string>' },
+  ].flatMap((f) => [false, true].map((matches): Fixture => ({
+    name: `reassignment retains ${f.name} declaration (${matches ? 'matches' : 'contradicts'})`,
+    files: {
+      'Types.cs': `namespace Example; ${f.types}`,
+      'Extensions.cs': extension(matches ? f.actual : f.wrong),
+      'Consumer.cs': `namespace Example; public class Consumer { public int Read() {\n${f.local}\ndataValue = ${f.assigned};\nreturn dataValue.AsSpan(); } }`,
+    }, target: matches ? 'Extensions.cs' : null, candidates: 1,
+  }))),
+  ...([false, true] as const).map((matches): Fixture => ({
+    name: `split-line var preserves generic member ownership (${matches ? 'matches' : 'contradicts'})`,
+    files: {
+      'Types.cs': 'namespace Example; public class Payload { } public class Other { } public class Holder { public Payload Data { get; } } public class Holder<T> { public Other Data { get; } }',
+      'Extensions.cs': extension(matches ? 'Other' : 'Payload'),
+      'Consumer.cs': 'namespace Example; public class Consumer { public int Read() { var\n holder = new Holder<int>(); return holder.Data.AsSpan(); } }',
+    }, target: matches ? 'Extensions.cs' : null, candidates: 1,
+  })),
+  ...([false, true] as const).map((matches): Fixture => ({
+    name: `qualified explicit local preserves member ownership (${matches ? 'matches' : 'contradicts'})`,
+    files: {
+      'Types.cs': 'namespace Example { public class Payload { } public class Other { } } namespace left { public class Holder { public Example.Payload Data { get; } } } namespace right { public class Holder { public Example.Other Data { get; } } }',
+      'Extensions.cs': extension(matches ? 'Example.Payload' : 'Example.Other'),
+      'Consumer.cs': 'namespace Example; public class Consumer { public int Read() { left.Holder holder = default; return holder.Data.AsSpan(); } }',
+    }, target: matches ? 'Extensions.cs' : null, candidates: 1,
+  })),
   {
     name: 'base-class receiver conversion',
     files: {

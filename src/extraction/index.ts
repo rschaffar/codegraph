@@ -58,6 +58,9 @@ const FILE_IO_BATCH_SIZE = 10;
  */
 const SYNC_RECONCILE_YIELD_INTERVAL = 1000;
 
+/** Internal work shared only within one extraction phase, before resolution. */
+interface DotnetSpanInvalidation { fresh?: boolean; failedDrain?: Promise<void>; onYield: MaybeYield }
+
 // PARSER_RESET_INTERVAL moved to parse-worker.ts (runs in worker thread)
 
 /**
@@ -2647,6 +2650,9 @@ export class ExtractionOrchestrator {
     // main thread (5–14s single stalls measured on llvm-project), starving
     // the #850 watchdog heartbeat on slow hardware.
     const commitYield = createYielder();
+    // The coordinator marks a completely fresh DB even without a store worker.
+    // It has nothing to reopen, and its secondary indexes may be dropped.
+    const spanInvalidation: DotnetSpanInvalidation = { fresh: storeWriterOpts != null, onYield: commitYield };
 
     const storeResult = async (filePath: string, content: string, stats: fs.Stats, result: ExtractionResult): Promise<void> => {
       processed++;
@@ -2690,7 +2696,7 @@ export class ExtractionOrchestrator {
         await storeWriter.waitBelow(STORE_WRITER_WINDOW);
       } else {
         const materialized = materializeKernelResult(result, filePath, language);
-        await this.storeExtractionResult(filePath, content, language, stats, materialized, commitYield);
+        await this.storeExtractionResult(filePath, content, language, stats, materialized, commitYield, spanInvalidation);
       }
 
       if (result.errors.length > 0) {
@@ -2770,11 +2776,11 @@ export class ExtractionOrchestrator {
     // Dispatch one file's parse (parses run concurrently across the pool), tagged
     // with its file-order sequence so flushOrdered commits results in order. The
     // backpressure below bounds how far parsing runs ahead of the in-order commit.
-    const feed = async (filePath: string, content: string, stats: fs.Stats): Promise<void> => {
+    const feed = async (filePath: string, content: string, stats: fs.Stats, ready?: ExtractionResult): Promise<void> => {
       const seq = nextSeq++;
       const p = (async () => {
         try {
-          const result = await parseFile(filePath, content);
+          const result = ready ?? await parseFile(filePath, content);
           completed.set(seq, { ok: true, filePath, content, stats, result });
         } catch (parseErr) {
           completed.set(seq, { ok: false, filePath, content, stats, err: parseErr });
@@ -2890,7 +2896,9 @@ export class ExtractionOrchestrator {
         // useful symbols. The single-file extractFile path already enforces
         // this; the bulk path used to silently skip the check.
         if (stats.size > MAX_SOURCE_FILE_SIZE_BYTES) {
-          await storeResult(filePath, content, stats, {
+          // Markers must share the ordered commit lane and its backpressure:
+          // a direct store could overlap an earlier file's yielding invalidation.
+          await feed(filePath, content, stats, {
             nodes: [],
             edges: [],
             unresolvedReferences: [],
@@ -3025,7 +3033,7 @@ export class ExtractionOrchestrator {
 
         if (result.nodes.length > 0 || result.errors.length === 0) {
           const stats = await fsp.stat(path.join(this.rootDir, filePath));
-          await this.storeExtractionResult(filePath, content, language, stats, result, commitYield);
+          await this.storeExtractionResult(filePath, content, language, stats, result, commitYield, spanInvalidation);
 
           const idx = errors.indexOf(errEntry);
           if (idx >= 0) errors.splice(idx, 1);
@@ -3080,7 +3088,7 @@ export class ExtractionOrchestrator {
 
           if (result.nodes.length > 0 || result.errors.length === 0) {
             const stats = await fsp.stat(path.join(this.rootDir, filePath));
-            await this.storeExtractionResult(filePath, fullContent, language, stats, result, commitYield);
+            await this.storeExtractionResult(filePath, fullContent, language, stats, result, commitYield, spanInvalidation);
 
             // Salvaged from comment-stripped source: keep a visible trace in
             // the summary instead of erasing the failure outright — the
@@ -3128,9 +3136,10 @@ export class ExtractionOrchestrator {
     let filesErrored = 0;
     let totalNodes = 0;
     let totalEdges = 0;
+    const spanInvalidation: DotnetSpanInvalidation = { onYield: createYielder() };
 
     for (const filePath of filePaths) {
-      const result = await this.indexFile(filePath);
+      const result = await this.indexFile(filePath, spanInvalidation);
 
       if (result.errors.length > 0) {
         errors.push(...result.errors);
@@ -3169,7 +3178,9 @@ export class ExtractionOrchestrator {
   /**
    * Index a single file
    */
-  async indexFile(relativePath: string): Promise<ExtractionResult> {
+  async indexFile(relativePath: string,
+    spanInvalidation: DotnetSpanInvalidation = { onYield: createYielder() }
+  ): Promise<ExtractionResult> {
     // Indexing read: follow in-root symlinks (the `../` guard still applies), #935.
     const fullPath = validatePathWithinRoot(this.rootDir, relativePath, { allowSymlinkEscape: true });
 
@@ -3216,7 +3227,7 @@ export class ExtractionOrchestrator {
       };
     }
 
-    return this.indexFileWithContent(relativePath, content, stats);
+    return this.indexFileWithContent(relativePath, content, stats, spanInvalidation);
   }
 
   /**
@@ -3226,7 +3237,8 @@ export class ExtractionOrchestrator {
   async indexFileWithContent(
     relativePath: string,
     content: string,
-    stats: fs.Stats
+    stats: fs.Stats,
+    spanInvalidation: DotnetSpanInvalidation = { onYield: createYielder() }
   ): Promise<ExtractionResult> {
     // Prevent `../` traversal; follow in-root symlinks like the directory walk (#935).
     const fullPath = validatePathWithinRoot(this.rootDir, relativePath, { allowSymlinkEscape: true });
@@ -3259,7 +3271,7 @@ export class ExtractionOrchestrator {
         ],
         durationMs: 0,
       };
-      await this.storeExtractionResult(relativePath, content, language, stats, result, createYielder());
+      await this.storeExtractionResult(relativePath, content, language, stats, result, spanInvalidation.onYield, spanInvalidation);
       return result;
     }
 
@@ -3281,7 +3293,7 @@ export class ExtractionOrchestrator {
     const result = extractFromSource(relativePath, content, language, frameworkNames);
 
     // Store in database
-    await this.storeExtractionResult(relativePath, content, language, stats, result, createYielder());
+    await this.storeExtractionResult(relativePath, content, language, stats, result, spanInvalidation.onYield, spanInvalidation);
 
     return result;
   }
@@ -3323,7 +3335,8 @@ export class ExtractionOrchestrator {
     language: Language,
     stats: fs.Stats,
     result: ExtractionResult,
-    onYield?: MaybeYield
+    onYield?: MaybeYield,
+    spanInvalidation: DotnetSpanInvalidation = { onYield: onYield ?? createYielder() }
   ): Promise<void> {
     // The file was never parsed: its grammar failed to load (#2335). Storing
     // this would replace the file's symbols with an empty row under the new
@@ -3372,7 +3385,7 @@ export class ExtractionOrchestrator {
 
     // Queue original calls before taking the incoming-edge snapshot: otherwise
     // identity-preserving reattachment would restore stale eligibility/metadata.
-    this.reopenDotnetSpanCalls(filePath, language, result.nodes);
+    await this.reopenDotnetSpanCalls(filePath, language, result.nodes, spanInvalidation);
 
     // Snapshot incoming cross-file edges BEFORE deleting this file's nodes.
     // `deleteFile` cascades to delete every edge whose source OR target is a
@@ -3774,18 +3787,50 @@ export class ExtractionOrchestrator {
    * the file, using pending refs as the durable queue (no fingerprint baseline
    * to lose on interruption). No general rebind ceiling/kill switch applies.
    */
-  private reopenDotnetSpanCalls(filePath: string, language: Language, next: readonly Node[]): void {
-    if (language !== 'csharp' && language !== 'vbnet') return;
+  private async reopenDotnetSpanCalls(
+    filePath: string, language: Language, next: readonly Node[], phase: DotnetSpanInvalidation
+  ): Promise<void> {
+    if (phase.fresh || (language !== 'csharp' && language !== 'vbnet')) return;
     const span = (n: Node): boolean => n.kind === 'method' &&
       ((n.language === 'csharp' && n.name === 'AsSpan') || (n.language === 'vbnet' && n.name.toLowerCase() === 'asspan'));
-    if (!next.some(span) && !this.queries.getNodesByFile(filePath).some(span)) return;
-    const targets = this.queries.getNodesByLowerName('asspan').filter(span);
-    const ids = new Set(targets.map((n) => n.id));
-    const names = [...new Set([...targets, ...next.filter(span)].map((n) => n.name))];
-    this.reopenEdges(this.queries.getResolutionEdgesByTargetName(names, Number.MAX_SAFE_INTEGER)
-      .filter((e) => e.kind === 'calls' && ids.has(e.target) && (e.sourceLanguage === 'csharp' || e.sourceLanguage === 'vbnet')));
-    this.queries.requeueFailedReferencesByLanguage('csharp', ['AsSpan']);
-    this.queries.requeueFailedReferencesByLanguage('vbnet', ['AsSpan']);
+    if (!next.some(span) && !this.queries.hasDotnetSpanMethod(filePath)) return;
+    const through = this.queries.getMaxEdgeId();
+    let targetCursor = 0;
+    for (;;) {
+      const targets = this.queries.getDotnetSpanTargetsPage(targetCursor);
+      if (targets.length === 0) break;
+      targetCursor = targets.at(-1)!.cursor;
+      for (const { target } of targets) {
+        if (target === null) continue;
+        let after = 0;
+        for (;;) {
+          const page = this.queries.getDotnetSpanCallsPage(target, after, through);
+          if (page.cursor === after) break;
+          after = page.cursor;
+          this.reopenEdges(page.edges);
+          const pause = phase.onYield();
+          if (pause) await pause;
+        }
+      }
+      const pause = phase.onYield();
+      if (pause) await pause;
+    }
+    // Stores emit pending refs, not new failures. Share this awaited drain,
+    // including overlapping indexAll stores, but never across resolution.
+    // Edge drains remain per-file: reattachment can change target language.
+    phase.failedDrain ??= this.reopenDotnetSpanFailures(phase.onYield);
+    await phase.failedDrain;
+  }
+
+  private async reopenDotnetSpanFailures(onYield: MaybeYield): Promise<void> {
+    let after = 0;
+    for (;;) {
+      const cursor = this.queries.reopenFailedDotnetSpanPage(after);
+      if (cursor === after) break;
+      after = cursor;
+      const pause = onYield();
+      if (pause) await pause;
+    }
   }
 
   private reopenEdges(edges: Array<Edge & { edgeId: number; sourceFilePath: string; sourceLanguage: Language }>): number {
@@ -3931,8 +3976,9 @@ export class ExtractionOrchestrator {
     // `reconcileChecks` drives the cooperative yield shared with the adds/mods loop
     // below (see SYNC_RECONCILE_YIELD_INTERVAL / issue #905).
     let reconcileChecks = 0;
-    const removeTracked = (tracked: FileRecord): void => {
-      this.reopenDotnetSpanCalls(tracked.path, tracked.language, []);
+    const spanInvalidation: DotnetSpanInvalidation = { onYield: createYielder() };
+    const removeTracked = async (tracked: FileRecord): Promise<void> => {
+      await this.reopenDotnetSpanCalls(tracked.path, tracked.language, [], spanInvalidation);
       // Before the cascade deletes them, resurrect incoming cross-file
       // resolution edges as their original refs (#1240 removal case): the
       // callers live in files this sync will NOT revisit, so this is their
@@ -3977,7 +4023,7 @@ export class ExtractionOrchestrator {
       if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[phase-timing] sync-removed-module-importers: ${Date.now() - tImporters}ms (${reopened} refs re-opened)`);
     }
     for (const tracked of removed) {
-      removeTracked(tracked);
+      await removeTracked(tracked);
       if (++reconcileChecks % SYNC_RECONCILE_YIELD_INTERVAL === 0) {
         await new Promise<void>((resolve) => setImmediate(resolve));
       }
@@ -4032,7 +4078,7 @@ export class ExtractionOrchestrator {
       if (content === null) {
         if (tracked) {
           reopenReferencesThroughRemovedFiles(this.queries, importReader, [tracked]);
-          removeTracked(tracked);
+          await removeTracked(tracked);
         }
         continue;
       }
@@ -4090,7 +4136,7 @@ export class ExtractionOrchestrator {
         currentFile: filePath,
       });
 
-      const result = await this.indexFile(filePath);
+      const result = await this.indexFile(filePath, spanInvalidation);
       if (result.errors.some(e => e.severity === 'error')) failedFilePaths.push(filePath);
       if (!hasGrammarLoadFailure(result.errors)) nodesUpdated += result.nodes.length; // else nothing was stored (#2335)
 

@@ -7010,7 +7010,7 @@ function csharpSpanMember(written: string, name: string, context: ResolutionCont
 }
 
 /** Read the actual caller's parameters, not another occurrence of a variable in the file. */
-function csharpSpanReceiver(receiver: string, ref: UnresolvedRef, context: ResolutionContext, inferred: string | null): CsharpSpanReceiver | null {
+function csharpSpanReceiver(receiver: string, ref: UnresolvedRef, context: ResolutionContext, inferred: string | null, decl?: GoReceiverDecl): CsharpSpanReceiver | null {
   const direct = context.getNodeById?.(ref.fromNodeId);
   const methods = direct?.kind === 'method' ? [direct] : context.getNodesInFile(ref.filePath).filter((n) => n.language === 'csharp' &&
     (n.kind === 'method' || n.kind === 'function') && n.startLine <= ref.line && n.endLine >= ref.line &&
@@ -7023,17 +7023,18 @@ function csharpSpanReceiver(receiver: string, ref: UnresolvedRef, context: Resol
   // One typed root/member hop reuses the existing class-member reader. No
   // global property-name search or arbitrary expression-chain binding.
   if (parts.length === 2 && /^[A-Za-z_]\w*$/.test(root)) {
-    const type = parameter?.type ?? csharpSpanReceiver(root, ref, context, inferLocalReceiverType(root, ref, context))?.written;
+    const rootDecl: GoReceiverDecl = {};
+    const type = parameter?.type ?? csharpSpanReceiver(root, ref, context, inferLocalReceiverType(root, ref, context, rootDecl), rootDecl)?.written;
     if (type) {
       const member = csharpSpanMember(type, parts[1]!, context);
       if (member) return { written: member, partial: false };
     }
   }
-  if (inferred && parts.length === 1) {
+  if (inferred && parts.length === 1 && decl?.line !== undefined && decl.column !== undefined) {
     const owner = methods[0];
     let locals = CSHARP_SPAN_LOCALS.get(context);
     if (!locals) CSHARP_SPAN_LOCALS.set(context, (locals = new Map()));
-    const key = `${owner?.id}|${root}|${inferred}`;
+    const key = `${owner?.id}|${root}|${inferred}|${decl.line}|${decl.column}`;
     if (locals.has(key)) {
       const written = locals.get(key);
       return written ? { written, partial: false } : { written: inferred, partial: true };
@@ -7042,17 +7043,51 @@ function csharpSpanReceiver(receiver: string, ref: UnresolvedRef, context: Resol
     if (!bodies) CSHARP_SPAN_BODIES.set(context, (bodies = new Map()));
     if (owner && !bodies.has(owner.id)) bodies.set(owner.id, csharpDeclarationHead(owner, context, owner.endLine - owner.startLine + 1));
     const head = owner ? bodies.get(owner.id) : null;
-    if (head) {
-      const r = escapeRegExp(root);
-      const typed = new RegExp(`(?:^|[;{}(,])\\s*(?:ref\\s+)?(${CSHARP_SOURCE_TYPE})\\s+@?${r}\\b\\s*(?=[=;,)])`, 'g');
-      const constructed = new RegExp(`\\bvar\\s+@?${r}\\s*=\\s*new\\s+(${CSHARP_SOURCE_TYPE})(?=\\s*[(\\[{])`, 'g');
-      // The shared inferrer already selected a local binding. Preserve its
-      // complete spelling only when the declaration agrees with that answer.
-      const found = [...head.matchAll(typed), ...head.matchAll(constructed)]
-        .filter((m) => csharpSpanShape(m[1]!).stem === csharpSpanShape(inferred).stem);
-      if (found.length === 1) {
-        locals.set(key, found[0]![1]!);
-        return { written: found[0]![1]!, partial: false };
+    if (head && owner && decl.line >= owner.startLine && decl.line <= owner.endLine) {
+      let lineStart = 0;
+      for (let line = owner.startLine; line < decl.line && lineStart >= 0; line++) {
+        const newline = head.indexOf('\n', lineStart);
+        lineStart = newline < 0 ? -1 : newline + 1;
+      }
+      const column = decl.column - (decl.line === owner.startLine ? owner.startColumn : 0);
+      if (lineStart >= 0 && column >= 0) {
+        const at = lineStart + column;
+        const r = escapeRegExp(root);
+        // The inferrer chose this exact declaration. Recover its complete
+        // spelling here; do not discover another binding in the caller body.
+        const tail = head.slice(at);
+        const typed = new RegExp(`^(${CSHARP_SOURCE_TYPE})(\\s+)@?${r}\\b\\s*(?=[=;,)])`).exec(tail);
+        const binding = typed ? at + typed[1]!.length + typed[2]!.length : at;
+        // Project backwards from the selected variable. An inference match may
+        // begin inside `left.Payload`; `var` may be on the preceding line.
+        const prefix = head.slice(0, binding);
+        const declared = new RegExp(`(?:^|[;{}(,])\\s*(?:ref\\s+)?(${CSHARP_SOURCE_TYPE})\\s+$`).exec(prefix);
+        const initializer = new RegExp(`^@?${r}\\s*=\\s*new\\s+(${CSHARP_SOURCE_TYPE})(?=\\s*[(\\[{])`).exec(head.slice(binding));
+        const constructed = /\bvar\s+$/.test(prefix) ? initializer : null;
+        const found = declared && csharpSpanShape(declared[1]!).stem === csharpSpanShape(inferred).stem ? declared : constructed;
+        if (found && csharpSpanShape(found[1]!).stem === csharpSpanShape(inferred).stem) {
+          locals.set(key, found[1]!);
+          return { written: found[1]!, partial: false };
+        }
+        if (initializer && !constructed) {
+          // Inference may select a reassignment, not a declaration. Its RHS
+          // cannot supply the static type (Payload value = new Payload<int>()).
+          // Retain the legacy unique-spelling rule only for this constructor
+          // fallback; ordinary bindings above use their selected provenance.
+          const legacyKey = `${owner.id}|${root}|${inferred}|declaration`;
+          if (!locals.has(legacyKey)) {
+            const legacyTyped = new RegExp(`(?:^|[;{}(,])\\s*(?:ref\\s+)?(${CSHARP_SOURCE_TYPE})\\s+@?${r}\\b\\s*(?=[=;,)])`, 'g');
+            const created = new RegExp(`\\bvar\\s+@?${r}\\s*=\\s*new\\s+(${CSHARP_SOURCE_TYPE})(?=\\s*[(\\[{])`, 'g');
+            const prior = [...head.matchAll(legacyTyped), ...head.matchAll(created)]
+              .filter((m) => csharpSpanShape(m[1]!).stem === csharpSpanShape(inferred).stem);
+            locals.set(legacyKey, prior.length === 1 ? prior[0]![1]! : null);
+          }
+          const written = locals.get(legacyKey);
+          if (written) {
+            locals.set(key, written);
+            return { written, partial: false };
+          }
+        }
       }
     }
     locals.set(key, null);
@@ -7097,9 +7132,9 @@ function csharpSpanTypesAgree(actual: CsharpSpanReceiver, expected: string, cont
 }
 
 /** Veto only the original winner: a rejected guess must not promote a runner-up. */
-function acceptsCsharpSpanGuess(target: Node, receiver: string, ref: UnresolvedRef, context: ResolutionContext, inferred: string | null): boolean {
+function acceptsCsharpSpanGuess(target: Node, receiver: string, ref: UnresolvedRef, context: ResolutionContext, inferred: string | null, decl?: GoReceiverDecl): boolean {
   if (/^(?:this|base)$/.test(receiver)) return true;
-  const actual = csharpSpanReceiver(receiver, ref, context, inferred);
+  const actual = csharpSpanReceiver(receiver, ref, context, inferred, decl);
   if (target.isStatic) {
     const first = csharpMethodParameters(target, context)?.[0];
     if (!first?.receiver) return false;
@@ -22544,7 +22579,7 @@ const PATTERN_MEMO_CAP = 8192;
  * ReferenceResolver.clearCaches calls clearNameMatcherMemos alongside
  * clearImportResolverMemos.
  */
-type InferScanState = { hi: number; ansIdx: number; ansType: string | null; ansRaw?: string };
+type InferScanState = { hi: number; ansIdx: number; ansType: string | null; ansRaw?: string; ansColumn?: number };
 const INFER_SCAN_STATES = new WeakMap<ResolutionContext, Map<string, InferScanState>>();
 
 /** Awaited inference caches are scoped to the resolver's stable-source window.
@@ -23680,6 +23715,7 @@ export function inferLocalReceiverType(
   const wholeWord = !phpProperty && ref.language !== 'php' && isWordCode(scanReceiver.charCodeAt(0)) && isWordCode(scanReceiver.charCodeAt(scanReceiver.length - 1));
   // The raw capture behind matchLine's latest non-null answer (see `decl`).
   let lastRaw: string | undefined;
+  let lastColumn: number | undefined;
   const matchLine = (i: number): string | null => {
     const line = lines[i];
     if (!line || nestedElsewhere?.(i)) return null;
@@ -23689,7 +23725,7 @@ export function inferLocalReceiverType(
     // pure waste — skip it rather than scan it.
     if (line.length > 10_000) return null;
     const input = `${scanReceiver}\0${line}`;
-    for (const re of i >= ownFrom ? withListed : patterns) {
+    for (const [patternIndex, re] of (i >= ownFrom ? withListed : patterns).entries()) {
       const m = re.exec(input);
       if (m && m[2]) {
         let type = ref.language === 'java' ? javaTypeName(m[2]) : normalizeInferredTypeName(m[2]);
@@ -23698,6 +23734,12 @@ export function inferLocalReceiverType(
         if (type && ref.language === 'pascal') type = pascalPointee(type, context) ?? type;
         if (type) {
           lastRaw = m[2];
+          // Shared patterns match name\0line from offset zero. Only C# needs
+          // the selected declaration's column: recover it with the same raw
+          // pattern, rather than mistaking the synthetic prefix for source.
+          if (decl && ref.language === 'csharp') {
+            lastColumn = localReceiverTypePatterns('csharp', escapedReceiver)[patternIndex]?.exec(line)?.index;
+          }
           return type;
         }
       }
@@ -23728,10 +23770,11 @@ export function inferLocalReceiverType(
         for (let i = hi; i >= lo; i--) {
           const type = matchLine(i);
           if (type) {
-            states.set(stateKey, { hi, ansIdx: i, ansType: type, ansRaw: lastRaw });
+            states.set(stateKey, { hi, ansIdx: i, ansType: type, ansRaw: lastRaw, ansColumn: lastColumn });
             if (decl) {
               decl.raw = lastRaw;
               decl.line = i + 1;
+              decl.column = lastColumn;
             }
             return type;
           }
@@ -23746,6 +23789,7 @@ export function inferLocalReceiverType(
             state.ansIdx = i;
             state.ansType = type;
             state.ansRaw = lastRaw;
+            state.ansColumn = lastColumn;
             break;
           }
         }
@@ -23754,6 +23798,7 @@ export function inferLocalReceiverType(
         if (decl) {
           decl.raw = state.ansRaw;
           decl.line = state.ansIdx + 1;
+          decl.column = state.ansColumn;
         }
         return state.ansType;
       }
@@ -23763,6 +23808,7 @@ export function inferLocalReceiverType(
           if (decl) {
             decl.raw = lastRaw;
             decl.line = i + 1;
+            decl.column = lastColumn;
           }
           return type;
         }
@@ -24638,6 +24684,7 @@ export function matchMethodCall(
   // exists on the inferred type, so a mis-inference produces no edge.
   let localInferred = false;
   let csharpReceiverType: string | null = null;
+  let csharpDeclaration: GoReceiverDecl | undefined;
   const csharpSpan = ref.language === 'csharp' && methodName === 'AsSpan';
   // Java: what javaReceiverDeclaredType read for the receiver, once it ran.
   let javaDeclared: ReturnType<typeof javaReceiverDeclaredType> | undefined;
@@ -24655,6 +24702,7 @@ export function matchMethodCall(
       if (typed !== undefined) return typed;
     }
     const decl: GoReceiverDecl = {};
+    if (ref.language === 'csharp') csharpDeclaration = decl;
     const cppDecl: CppReceiverDeclaration = {};
     let inferredType = nmTimedT('mc-infer', ref, () =>
       ref.language === 'cpp'
@@ -25607,7 +25655,7 @@ export function matchMethodCall(
     });
     if (strat3) {
       const target = csharpSpan ? context.getNodeById?.(strat3.targetNodeId) : null;
-      return !csharpSpan || (target && acceptsCsharpSpanGuess(target, objectOrClass!, ref, context, csharpReceiverType)) ? strat3 : null;
+      return !csharpSpan || (target && acceptsCsharpSpanGuess(target, objectOrClass!, ref, context, csharpReceiverType, csharpDeclaration)) ? strat3 : null;
     }
   }
 
@@ -26197,6 +26245,8 @@ interface GoReceiverDecl {
   declared?: string | null;
   /** The line the inference read the declaration on. */
   line?: number;
+  /** Start of the selected declaration/initializer match on that line. */
+  column?: number;
 }
 
 const GO_ASSERTION_BINDINGS = new WeakMap<ResolutionContext, Map<string, Set<string>>>();
