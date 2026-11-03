@@ -4,6 +4,7 @@ import ReviewBoardView from '../ui/src/views/ReviewBoardView.svelte';
 import { setGraphAdapter, type GraphAdapter, type SourceRequest } from '../ui/src/lib/adapter';
 import { boardRequests } from '../ui/src/lib/board-requests.svelte';
 import type { BoardSymbol } from '../ui/src/lib/board-model';
+import { edgeKinds, relationColor, relationLabel } from '../ui/src/lib/board-catalog';
 import type { BoardConnections, BoardConnectionRequest, BoardDocument, BoardExclusions, BoardLoaded, BoardSnapshot, SaveBoardRequest } from '../ui/src/lib/board-wire';
 
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
@@ -119,6 +120,43 @@ beforeEach(() => {
   calls = mocks(); setGraphAdapter(calls as unknown as GraphAdapter); vi.spyOn(window, 'confirm').mockReturnValue(true);
 });
 afterEach(async () => { if (mounted) await unmount(mounted); host.remove(); boardRequests.take(); setGraphAdapter(null); vi.restoreAllMocks(); });
+
+describe('Board relationship rendering', () => {
+  it('matches line/arrow colors per kind and retains them with labels and evidence dashes on selection', async () => {
+    // Svelte Flow suppresses edges for zero-size jsdom nodes. Give this test's
+    // nodes measurable dimensions without changing the lifecycle-test sandbox.
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(286);
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(160);
+    const kinds = [...edgeKinds, 'future_relation'];
+    const relations = kinds.map((kind) => ({ ...edge, id: kind, kind,
+      ...(kind === 'calls' ? { synthesizedBy: 'callback', via: 'callback' } : {}),
+      ...(kind === 'references' ? { confidence: 0.3 } : {}),
+    }));
+    calls.board.mockImplementation(async (ids) => ({ ...snapshot(ids), relations }));
+    await render(); boardRequests.enqueue(['a', 'b']); await settle();
+    for (const label of ['Ownership arrows', 'Uncertain matches']) {
+      const checkbox = [...host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((item) => item.parentElement?.textContent?.trim() === label)!;
+      checkbox.click(); await settle();
+    }
+    function assertColors() {
+      const paths = [...host.querySelectorAll<SVGElement>('.svelte-flow__edge-path')];
+      expect(paths).toHaveLength(kinds.length);
+      for (const kind of kinds) {
+        const path = paths.find((item) => item.style.stroke === relationColor(kind))!;
+        expect(path, kind).toBeDefined();
+        const markerId = path.getAttribute('marker-end')!.match(/url\(['"]?#(.*?)['"]?\)$/)![1];
+        const arrow = [...host.querySelectorAll<SVGElement>('marker')].find((item) => item.id === markerId)!.querySelector<SVGElement>('polyline')!;
+        expect(arrow.style.fill).toBe(relationColor(kind));
+        expect(host.textContent).toContain(relationLabel(kind));
+        expect(path.style.strokeDasharray).toBe(['calls', 'references'].includes(kind) ? '6 4' : '');
+      }
+      return paths;
+    }
+    const before = assertColors().map((path) => path.style.strokeWidth);
+    host.querySelector<HTMLElement>('.svelte-flow__node[data-id="a"]')!.click(); await settle();
+    expect(assertColors().map((path) => path.style.strokeWidth)).not.toEqual(before);
+  });
+});
 
 describe('Board replacement and metadata request lifetimes', () => {
   it('orders same-board Delete after pending Save and keeps the retained recipe unsaved', async () => {
