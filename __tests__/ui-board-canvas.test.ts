@@ -121,6 +121,159 @@ beforeEach(() => {
 });
 afterEach(async () => { if (mounted) await unmount(mounted); host.remove(); boardRequests.take(); setGraphAdapter(null); vi.restoreAllMocks(); });
 
+describe('Board pointer interactions and placement', () => {
+  const bounds = { x: 100, y: 200, left: 100, top: 200, right: 1100, bottom: 900, width: 1000, height: 700, toJSON() {} };
+  const view = { x: 80, y: -40, zoom: 0.8 };
+  function node(id: string) { return host.querySelector<HTMLElement>(`.svelte-flow__node[data-id="${id}"]`)!; }
+  function selectedIds() { return [...host.querySelectorAll<HTMLElement>('.svelte-flow__node.selected')].map((item) => item.dataset.id).sort(); }
+  function mouse(type: string, init: MouseEventInit) {
+    const event = new MouseEvent(type, { bubbles: true, cancelable: true, ...init });
+    // Vitest's global Window proxy fails jsdom's constructor brand check; d3 needs event.view.
+    Object.defineProperty(event, 'view', { value: window });
+    return event;
+  }
+  function pointer(target: EventTarget, type: string, x: number, y: number, shift = false, button = 0) {
+    const event = mouse(type, { clientX: x, clientY: y, shiftKey: shift, button, buttons: type === 'pointerup' ? 0 : button === 2 ? 2 : 1 });
+    Object.defineProperties(event, { isPrimary: { value: true }, pointerId: { value: 1 }, pointerType: { value: 'mouse' } });
+    target.dispatchEvent(event);
+  }
+  async function marquee(from: [number, number], to: [number, number], shift = false) {
+    const pane = host.querySelector('.svelte-flow__pane')!;
+    pointer(pane, 'pointerdown', ...from, shift); await settle();
+    pointer(pane, 'pointermove', ...to, shift); await settle();
+    pointer(pane, 'pointerup', ...to, shift); await settle();
+  }
+  async function cardClick(id: string, shift = false) {
+    if (shift) { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Shift', code: 'ShiftLeft', shiftKey: true })); await settle(); }
+    node(id).dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: shift, detail: 1 })); await settle();
+    if (shift) { window.dispatchEvent(new KeyboardEvent('keyup', { key: 'Shift', code: 'ShiftLeft' })); await settle(); }
+  }
+  async function savedState() {
+    input('Board name', 'Pointer review'); await click('Save');
+    return calls.saveBoard.mock.calls.at(-1)![0].document;
+  }
+  beforeEach(() => {
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(private callback: (entries: { target: Element }[]) => void) {}
+      observe(target: Element) { if (target.hasAttribute('data-id')) queueMicrotask(() => { if (target.isConnected) this.callback([{ target }]); }); }
+      unobserve() {} disconnect() {}
+    });
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(bounds);
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockImplementation(function () { return this.classList.contains('svelte-flow__node-code') ? 530 : 286; });
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function () { return this.classList.contains('svelte-flow__node-code') ? 310 : 160; });
+    const recipe = documentFor(a); recipe.viewport = { ...view }; recipe.symbols[0].position = { x: 50, y: 50 };
+    recipe.symbols.push({ ...documentFor(b).symbols[0], key: 's1', position: { x: 500, y: 300 } });
+    records.get('a')!.document = recipe;
+  });
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('toggles mixed card selections with Shift, replaces on plain click, and moves the selected group', async () => {
+    await render(); await open(); await click('Open Alpha source');
+    expect(selectedIds()).toEqual(['code:a']);
+    await cardClick('a', true); expect(selectedIds()).toEqual(['a', 'code:a']);
+    await cardClick('a', true); expect(selectedIds()).toEqual(['code:a']);
+    await cardClick('b', true); expect(selectedIds()).toEqual(['b', 'code:a']);
+    const before = [node('b').style.transform, node('code:a').style.transform, node('a').style.transform];
+    node('b').querySelector('header')!.dispatchEvent(mouse('mousedown', { button: 0, buttons: 1, clientX: 600, clientY: 520 }));
+    window.dispatchEvent(mouse('mousemove', { button: 0, buttons: 1, clientX: 605, clientY: 525 })); await settle();
+    window.dispatchEvent(mouse('mousemove', { button: 0, buttons: 1, clientX: 650, clientY: 545 })); await settle();
+    window.dispatchEvent(mouse('mouseup', { button: 0, clientX: 650, clientY: 545 })); await settle();
+    expect(selectedIds()).toEqual(['b', 'code:a']);
+    expect(node('b').style.transform).not.toBe(before[0]); expect(node('code:a').style.transform).not.toBe(before[1]); expect(node('a').style.transform).toBe(before[2]);
+    // d3 suppresses the click immediately following a drag until the next task.
+    await settle(); await cardClick('b'); expect(selectedIds()).toEqual(['b']);
+  });
+
+  it('selects touched cards with a rectangle, adds with Shift, and clears on empty click without panning', async () => {
+    const initialView = { x: 0, y: 0, zoom: 1 }; records.get('a')!.document.viewport = initialView;
+    await render(); await open();
+    // Alpha starts at screen (150, 250); select just a small corner, not its whole bounds.
+    await marquee([140, 240], [160, 260]); expect(selectedIds()).toEqual(['a']);
+    await marquee([590, 490], [610, 510], true); expect(selectedIds()).toEqual(['a', 'b']);
+    await marquee([590, 490], [610, 510]); expect(selectedIds()).toEqual(['b']);
+    await marquee([800, 600], [900, 600], true); expect(selectedIds()).toEqual(['b']);
+    await marquee([800, 600], [800, 700]); expect(selectedIds()).toEqual([]);
+    await marquee([1000, 800], [1000, 800]); expect(selectedIds()).toEqual([]);
+    expect((await savedState()).viewport).toEqual(initialView);
+    expect(host.querySelector('[aria-label="Relationship evidence"]')).toBeNull();
+  });
+
+  it('pans with the right mouse button on empty canvas but not on cards', async () => {
+    const initialView = { x: 0, y: 0, zoom: 1 }; records.get('a')!.document.viewport = initialView;
+    await render(); await open();
+    async function drag(target: Element) {
+      target.dispatchEvent(mouse('mousedown', { button: 2, buttons: 2, clientX: 700, clientY: 500 }));
+      window.dispatchEvent(mouse('mousemove', { button: 2, buttons: 2, clientX: 760, clientY: 530 }));
+      window.dispatchEvent(mouse('mouseup', { button: 2, clientX: 760, clientY: 530 })); await settle();
+    }
+    await drag(node('a').querySelector('header')!); expect((await savedState()).viewport).toEqual(initialView);
+    await drag(host.querySelector('.svelte-flow__pane')!);
+    expect((await savedState()).viewport).toEqual({ x: 60, y: 30, zoom: 1 });
+  });
+
+  it('opens direct source actions at the click under pan/zoom, preserves the viewport, and raises existing cards in place', async () => {
+    await render(); await open();
+    button('Open Alpha source').dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1, clientX: 620, clientY: 440 })); await settle();
+    let recipe = await savedState();
+    expect(recipe.cards[0].position).toEqual({ x: 565, y: 365 }); expect(recipe.viewport).toEqual(view);
+    expect(selectedIds()).toEqual(['code:a']);
+    const firstZ = recipe.cards[0].zIndex;
+    button('Open Beta source').dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1, clientX: 620, clientY: 440 })); await settle();
+    recipe = await savedState(); expect(recipe.cards[1].position).toEqual(recipe.cards[0].position); // overlap is deliberate
+    button('Open Alpha source').dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1, clientX: 900, clientY: 800 })); await settle();
+    recipe = await savedState(); expect(recipe.cards).toHaveLength(2); expect(recipe.cards[0].position).toEqual({ x: 565, y: 365 });
+    expect(recipe.cards[0].zIndex).toBeGreaterThan(firstZ); expect(selectedIds()).toEqual(['code:a']); expect(recipe.viewport).toEqual(view);
+  });
+
+  it('uses the pin click rather than a restored source-only placeholder position', async () => {
+    const recipe = records.get('a')!.document; recipe.symbols[0].expanded = true;
+    recipe.symbols.push({ ...documentFor(children[0]).symbols[0], key: 'member', included: false, position: { x: 30, y: 30 } });
+    recipe.cards.push({ key: 'code-member', symbolKey: 'member', position: { x: 800, y: 600 }, width: 530, height: 310, collapsed: false, zIndex: 12 });
+    await render(); await open();
+    button('Pin Alpha.member0 separately').dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1, clientX: 620, clientY: 440 })); await settle();
+    const saved = await savedState();
+    expect(saved.symbols.find((item) => item.identity.id === 'm0')).toMatchObject({ included: true, position: { x: 565, y: 365 } });
+    expect(saved.cards[0].position).toEqual({ x: 800, y: 600 }); expect(saved.viewport).toEqual(view);
+  });
+
+  it('keeps pan and zoom when accepting Add to board from another reader', async () => {
+    await render(); await open(); boardRequests.enqueue(['m0']); await settle();
+    const saved = await savedState();
+    expect(saved.symbols.find((item) => item.identity.id === 'm0')?.included).toBe(true);
+    expect(saved.viewport).toEqual(view);
+  });
+
+  it('follows a source card target at the click without reselecting the origin or moving the viewport', async () => {
+    await render(); await open(); await click('Open Alpha source');
+    host.querySelector<HTMLButtonElement>('.target-link')!.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1, clientX: 620, clientY: 440 })); await settle();
+    const saved = await savedState();
+    expect(saved.cards).toHaveLength(2); expect(saved.cards[1].position).toEqual({ x: 565, y: 365 });
+    expect(selectedIds()).toEqual(['code:b']); expect(saved.viewport).toEqual(view);
+  });
+
+  it('keeps keyboard source-link activation centered and selects the opened card, not its origin', async () => {
+    calls.boardConnections.mockResolvedValue({ ...connections({ id: 'a', direction: 'outgoing', members: true }),
+      total: 1, nextOffset: null, items: [{ target: b, evidence: [edge], total: 1 }] });
+    calls.source.mockImplementation(async (request) => ({ file: request.file, language: 'typescript', drift: false, showing: 'indexed',
+      contentHash: 'matching', indexedAt: 1, generated: false, totalLines: 100, from: 1, to: 2, lines: ['// source', 'Beta();'] }));
+    await render(); await open(); await click('Open Alpha source');
+    const ref = host.querySelector<HTMLElement>('.source [role="link"]')!; expect(ref).not.toBeNull();
+    ref.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); await settle();
+    const saved = await savedState(); expect(saved.cards).toHaveLength(2);
+    expect(selectedIds()).toEqual(['code:b']); expect(saved.cards[1].position).toEqual({ x: 260, y: 332.5 }); expect(saved.viewport).toEqual(view);
+  });
+
+  it('centers menu and keyboard openings in the current view rather than using their screen click', async () => {
+    await render(); await open(); await click('+ Add symbols');
+    const row = [...host.querySelectorAll('.library .result')].find((item) => item.querySelector('strong')?.textContent === 'Alpha')!;
+    button('Source', row).dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1, clientX: 1050, clientY: 270 })); await settle();
+    let recipe = await savedState(); expect(recipe.cards[0].position).toEqual({ x: 260, y: 332.5 }); expect(recipe.viewport).toEqual(view);
+    await click('Open Beta source'); // .click() is also how keyboard button activation is surfaced (detail = 0)
+    recipe = await savedState(); expect(recipe.cards[1].position).toEqual(recipe.cards[0].position); expect(recipe.viewport).toEqual(view);
+  });
+});
+
 describe('Board relationship rendering', () => {
   it('matches line/arrow colors per kind and retains them with labels and evidence dashes on selection', async () => {
     // Svelte Flow suppresses edges for zero-size jsdom nodes. Give this test's

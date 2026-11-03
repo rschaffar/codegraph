@@ -30,7 +30,7 @@
     defName: string;
     /** Line from `?hl=` — tinted and scrolled to. */
     highlight: number | null;
-    onfollow: (ref: LineRef) => void;
+    onfollow: (ref: LineRef, event?: MouseEvent) => void;
   }
 
   let { block, tokens, refs, defLine, defName, highlight, onfollow }: Props = $props();
@@ -123,7 +123,7 @@
                 role="link"
                 tabindex="0"
                 title={ref.title}
-                onclick={() => onfollow(ref)}
+                onclick={(event) => onfollow(ref, event)}
                 onkeydown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault();

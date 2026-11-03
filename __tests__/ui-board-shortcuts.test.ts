@@ -170,7 +170,10 @@ describe('linked source cards', () => {
     const ref = host.querySelector<HTMLElement>('.source [role="link"]')!;
     expect(ref.textContent).toBe('render'); expect(ref.title).toContain('references Renderer.render');
     ref.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
-    expect(follow).toHaveBeenCalledWith(expect.objectContaining({ id: target.id }), undefined);
+    expect(follow).toHaveBeenCalledWith(expect.objectContaining({ id: target.id }), undefined, undefined);
+    const event = new MouseEvent('click', { bubbles: true, detail: 1, clientX: 420, clientY: 280 });
+    ref.dispatchEvent(event);
+    expect(follow).toHaveBeenLastCalledWith(expect.objectContaining({ id: target.id }), undefined, event);
     expect(host.querySelectorAll('[data-code-card]')).toHaveLength(2);
     expect(adapter.calls.board).not.toHaveBeenCalled(); expect(boardRequests.pending).toEqual([]);
     expect(host.querySelectorAll('.source [role="link"]')).toHaveLength(2);
@@ -189,7 +192,7 @@ describe('linked source cards', () => {
     expect(host.querySelector('.source [role="link"]')).toBeNull();
     expect(host.textContent).toContain('Inline target links are withheld');
     host.querySelector<HTMLButtonElement>('.target-link')!.click();
-    expect(follow).toHaveBeenCalledWith(expect.objectContaining({ id: peers[0].id }), undefined);
+    expect(follow).toHaveBeenCalledWith(expect.objectContaining({ id: peers[0].id }), undefined, expect.any(MouseEvent));
     button('Load more targets (8 of 9)').click(); await settle();
     expect(host.querySelector('.source [role="link"]')).toBeNull();
     expect(host.textContent).toContain('Z.render');

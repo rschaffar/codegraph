@@ -47,7 +47,7 @@
             <KindGlyph kind={row.symbol.kind} />
             <button class="member-name" title={`${kindLabel(row.symbol.kind)} · ${row.symbol.qualifiedName}`}
               aria-label={`Open ${row.symbol.qualifiedName} source`} aria-current={located(row) ? 'location' : undefined}
-              onclick={() => data.act('code', row.symbol.id)}>{row.symbol.name}</button>
+              onclick={(event) => data.act('code', row.symbol.id, event)}>{row.symbol.name}</button>
             {#if row.hasChildren}<span class="member-count" title="Eligible indexed direct members">{row.memberCount}</span>{/if}
           </div>
           <div class="member-actions">
@@ -59,7 +59,7 @@
               {#if row.pinned}
                 <button class="pinned" aria-label={`Locate pinned ${row.symbol.qualifiedName}`} title="Edges use the separate pinned card" onclick={() => data.act('locate', row.symbol.id)}>Pinned · Locate</button>
               {:else if data.canPinMembers}
-                <button aria-label={`Pin ${row.symbol.qualifiedName} separately`} onclick={() => data.act('pin', row.symbol.id)}>Pin</button>
+                <button aria-label={`Pin ${row.symbol.qualifiedName} separately`} onclick={(event) => data.act('pin', row.symbol.id, event)}>Pin</button>
               {/if}
               {#if data.canPinMembers}<button aria-label={`Hide member ${row.symbol.qualifiedName}`} onclick={() => data.act('hide', row.symbol.id)}>Hide</button>{/if}
             {/if}
@@ -101,7 +101,7 @@
   </div>
   <div class="actions nodrag nopan nokey">
     <button class="connections" aria-label={`Connections for ${data.symbol.qualifiedName}`} onclick={() => data.act('connections', id)}>Connections…</button>
-    <button aria-label={`Open ${data.symbol.qualifiedName} source`} onclick={() => data.act('code', id)}>Source ↗</button>
+    <button aria-label={`Open ${data.symbol.qualifiedName} source`} onclick={(event) => data.act('code', id, event)}>Source ↗</button>
   </div>
   {#if data.memberCount || data.retainedMemberCount || data.memberRows?.length}
     <div class="member-toggle nodrag nopan nokey"><button aria-label={`${data.expanded ? 'Collapse' : 'Expand'} ${data.symbol.qualifiedName} members`}
