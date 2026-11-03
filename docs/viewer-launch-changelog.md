@@ -15,6 +15,8 @@ These describe `codegraph ui` and its screens. They were taken out of `## [Unrel
 
 ## New Features
 
+- Review Board supports right-drag panning, Shift-click and rectangle multi-selection, group movement, and opening cards where you click without moving your view.
+
 - A local Review Board lets you preview folders and namespaces, choose symbols and typed connections, explore nested members, follow links between movable source cards and save named arrangements without changing source or Git state.
 
 - A local Review Board clickdummy at `/board-prototype.html` lets reviewers explore every symbol and relationship kind, explicitly add connected targets, restore hidden items and compare movable source cards using clearly labelled synthetic data with no saved state.

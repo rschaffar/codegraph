@@ -9,7 +9,7 @@ export interface BoardEvidence {
   confidence?: number; provenance?: string; synthesizedBy?: string; via?: string; registeredAt?: string; resolvedBy?: string;
 }
 export type SymbolAction = 'connections' | 'contents' | 'hide' | 'restore' | 'expand' | 'more' | 'code' | 'locate' | 'pin';
-export type ActOnSymbol = (action: SymbolAction, id: string) => void;
+export type ActOnSymbol = (action: SymbolAction, id: string, event?: MouseEvent) => void;
 export interface BoardFilters { tests: boolean; generated: boolean; uncertain: boolean }
 /** Contiguous direct-child pages, separate from incidental ancestry/Connections facts. */
 export interface BoardMemberPageState {
@@ -48,7 +48,7 @@ export interface CodeCardData extends Record<string, unknown> {
   toggle: (id: string) => void; read: (id: string) => void;
 }
 export interface SourceCardData extends CodeCardData {
-  symbol: BoardSymbol; follow?: (target: BoardSymbol, line?: number) => void; highlight?: number | null;
+  symbol: BoardSymbol; follow?: (target: BoardSymbol, line?: number, event?: MouseEvent) => void; highlight?: number | null;
   filters?: BoardFilters;
   resize?: (id: string, widthDelta: number, heightDelta: number) => void;
 }

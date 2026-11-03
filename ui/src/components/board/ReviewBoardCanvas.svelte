@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
-  import { Background, Controls, MiniMap, SvelteFlow, MarkerType, useSvelteFlow, type Edge, type Node } from '@xyflow/svelte';
+  import { Background, Controls, MiniMap, SvelteFlow, MarkerType, SelectionMode, useSvelteFlow, type Edge, type Node } from '@xyflow/svelte';
   import '@xyflow/svelte/dist/style.css';
   import BoardSymbolNode from './BoardSymbolNode.svelte';
   import BoardSourceCard from './BoardSourceCard.svelte';
@@ -8,13 +8,13 @@
   import KindGlyph from '../KindGlyph.svelte';
   import { getGraphAdapter } from '../../lib/adapter';
   import { cardFamily, edgeKinds, nodeKinds, kindLabel, relationLabel, relationColor } from '../../lib/board-catalog';
-  import { createBoardModel, edgeLaneMap, mergeBoardFacts, isBoardEvidenceUncertain, BOARD_MEMBER_REVEAL_LIMIT, nextCodePosition, nextSymbolPosition, type BoardMemberPageState, type BoardSymbol, type BoardEvidence, type BoardRelation, type SymbolAction, type SymbolData, type SourceCardData } from '../../lib/board-model';
+  import { createBoardModel, edgeLaneMap, mergeBoardFacts, isBoardEvidenceUncertain, BOARD_MEMBER_REVEAL_LIMIT, nextSymbolPosition, type BoardMemberPageState, type BoardSymbol, type BoardEvidence, type BoardRelation, type SymbolAction, type SymbolData, type SourceCardData } from '../../lib/board-model';
   import type { BoardSnapshot, BoardDocument, BoardLoaded, BoardList, BoardSearch, BoardConnections, BoardConnectionRequest, BoardGroups } from '../../lib/board-wire';
   import { live } from '../../lib/live.svelte';
   import { boardRequests } from '../../lib/board-requests.svelte';
 
   const adapter = getGraphAdapter();
-  const { fitView } = useSvelteFlow();
+  const { fitView, screenToFlowPosition, getIntersectingNodes } = useSvelteFlow();
   const nodeTypes = { symbol: BoardSymbolNode, code: BoardSourceCard };
   const edgeTypes = { relation: BoardRelationEdge };
   type BoardNode = Node<SymbolData, 'symbol'> | Node<SourceCardData, 'code'>;
@@ -28,6 +28,9 @@
   let viewport = $state({ x: 0, y: 0, zoom: 1 });
   let selected = $state<string | null>(null);
   let selectedSources = $state<string[]>([]);
+  let rectangleBase: string[] = [];
+  let rectangleOrigin: { x: number; y: number } | null = null;
+  let selectingRectangle = false;
   let locatedMember = $state<string | undefined>();
   let panel = $state<'library' | 'connections' | 'hidden' | 'boards' | null>(null);
   let evidence = $state<BoardRelation | null>(null);
@@ -110,7 +113,7 @@
     const uncertain = edge.evidence.some(isBoardEvidenceUncertain);
     const color = relationColor(edge.kind);
     return { id: edge.id, source: edge.source, target: edge.target, sourceHandle: edge.sourceHandle, targetHandle: edge.targetHandle,
-      type: 'relation', data: { relation: edge, lane }, label: `${relationLabel(edge.kind)}${edge.evidence.length > 1 ? ` · ${edge.evidence.length}` : ''}${edge.via ? ' · synthesized' : ''}${uncertain ? ' · uncertain' : ''}`,
+      type: 'relation', selectable: false, data: { relation: edge, lane }, label: `${relationLabel(edge.kind)}${edge.evidence.length > 1 ? ` · ${edge.evidence.length}` : ''}${edge.via ? ' · synthesized' : ''}${uncertain ? ' · uncertain' : ''}`,
       markerEnd: { type: MarkerType.ArrowClosed, color },
       style: `stroke:${color};stroke-width:${hot ? 2.4 : 1.5};${edge.via || uncertain ? 'stroke-dasharray:6 4;' : ''}`,
       labelStyle: 'color:var(--ink-2);font:10px var(--mono);background:var(--paper);padding:4px 5px', interactionWidth: 20 };
@@ -155,6 +158,36 @@
     }
     nodes = [...graph, ...nodes.filter((node) => node.type === 'code').map((node) => node.type === 'code' ? { ...node, data: { ...node.data, filters, follow: followSource, resize: resizeCard } } : node)];
   }
+  // Flow replaces selection during a marquee, even with its multi-select key held.
+  function startPointerSelection(event: PointerEvent) {
+    if (event.button !== 0 || !(event.target instanceof Element) || !event.target.classList.contains('svelte-flow__pane')) return;
+    rectangleBase = event.shiftKey ? nodes.filter((node) => node.selected).map((node) => node.id) : [];
+    rectangleOrigin = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+  }
+  function finishRectangleSelection(event: PointerEvent) {
+    if (rectangleOrigin) {
+      const end = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+      const width = Math.abs(end.x - rectangleOrigin.x), height = Math.abs(end.y - rectangleOrigin.y);
+      // Flow considers a zero-area rectangle to contain every node.
+      const hits = width > 0 && height > 0 ? getIntersectingNodes({ x: Math.min(rectangleOrigin.x, end.x), y: Math.min(rectangleOrigin.y, end.y), width, height }, true) : [];
+      const chosen = new Set([...rectangleBase, ...hits.map((node) => node.id)]);
+      // Recompute on release: Flow can skip reselecting the same hits on consecutive marquees.
+      selectingRectangle = false;
+      nodes = nodes.map((node) => ({ ...node, selected: chosen.has(node.id) }));
+    }
+    rectangleOrigin = null; rectangleBase = []; selectingRectangle = false;
+  }
+  function retainRectangleSelection() {
+    if (selectingRectangle && rectangleBase.some((id) => nodes.some((node) => node.id === id && !node.selected))) {
+      nodes = nodes.map((node) => rectangleBase.includes(node.id) ? { ...node, selected: true } : node);
+    }
+  }
+  function openingPosition(event?: MouseEvent, width = 530, height = 310) {
+    if (event && event.detail > 0) return screenToFlowPosition({ x: event.clientX + 12, y: event.clientY + 12 });
+    const bounds = boardElement?.querySelector('.svelte-flow')?.getBoundingClientRect();
+    return screenToFlowPosition({ x: (bounds?.left ?? 0) + ((bounds?.width ?? 0) - width * viewport.zoom) / 2,
+      y: (bounds?.top ?? 0) + ((bounds?.height ?? 0) - height * viewport.zoom) / 2 });
+  }
   function reflectSourceSelection(items: readonly Node[]) {
     const ids = items.filter((item) => item.type === 'code').map((item) => String(item.data.symbolId));
     if (JSON.stringify(ids) !== JSON.stringify(selectedSources)) { selectedSources = ids; refresh(); }
@@ -174,14 +207,16 @@
     } catch (cause) { if (current === request) fail(cause); }
     finally { if (current === request) busy = false; }
   }
-  async function add(ids: string[]) {
+  async function add(ids: string[], position = openingPosition(undefined, 286, 240)) {
     const generation = epoch;
-    const firstSelection = included.length === 0;
     const unique = [...new Set([...included, ...ids])];
     if (new Set([...unique, ...expanded, ...hidden, ...nodes.filter((node) => node.type === 'code').map((node) => node.data.symbolId)]).size > 128) { error = 'A board can retain at most 128 symbol identities including source cards. Narrow the selection first.'; return; }
+    for (const [index, id] of ids.entries()) if (!included.includes(id)) {
+      positions.set(id, { x: position.x + index * 24, y: position.y + index * 24 });
+    }
     included = unique; hidden = hidden.filter((id) => !ids.includes(id)); evidence = null;
     searchSelection = searchSelection.filter((id) => !ids.includes(id)); connectionSelection = [];
-    await loadSnapshot(firstSelection);
+    await loadSnapshot();
     if (generation !== epoch) return;
     notice = `${ids.length} chosen symbol(s) included. No neighbours added. Existing positions preserved.`;
     if (panel === 'hidden') void tick().then(() => boardElement.querySelector<HTMLElement>('aside h2, aside button')?.focus());
@@ -232,12 +267,12 @@
     boardElement?.querySelector<HTMLElement>(`[data-member="${CSS.escape(id)}"] button.member-name`)?.focus();
     notice = owner === id ? `Located ${display(id)}.` : `Located exact member: ${reveal.path.map(display).join(' → ')}.`;
   }
-  function act(action: SymbolAction, id: string) {
+  function act(action: SymbolAction, id: string, event?: MouseEvent) {
     error = ''; evidence = null;
     if (action === 'connections') void openConnections(id);
     else if (action === 'contents') void openConnections(id, { members: false, kind: 'contains' });
     else if (action === 'restore') void restoreHidden([id]);
-    else if (action === 'pin') void add([id]);
+    else if (action === 'pin') { event?.stopPropagation(); void add([id], openingPosition(event, 286, 240)); }
     else if (action === 'hide') {
       if (new Set([...included, ...expanded, ...hidden, ...nodes.filter((node) => node.type === 'code').map((node) => node.data.symbolId), id]).size > 128) { error = 'The board already retains 128 identities; remove an existing selection before retaining another hidden member.'; return; }
       hidden = [...new Set([...hidden, id])]; hideHistory = [...hideHistory.filter((item) => item !== id), id]; selected = null; refresh(); notice = `${display(id)} hidden. Undo hide or restore from Connections/Hidden items.`;
@@ -257,7 +292,7 @@
       refresh();
       if ((action === 'more' || expanded.includes(id)) && (limits[id] ?? 6) < BOARD_MEMBER_REVEAL_LIMIT) notice = 'Member detail changed without moving cards. Pan or Fit graph if the longer outline extends beyond the viewport.';
     } else if (action === 'locate') void locate(id);
-    else openCode(id);
+    else openCode(id, true, null, event);
   }
   function connectionArgs(offset = 0): BoardConnectionRequest { return { id: connectionScope!, direction, members: withMembers, kind: connectionKind || undefined, q: connectionQ || undefined, offset, ...filters }; }
   async function loadConnections(offset = 0, paging = false, submitted?: BoardConnectionRequest) {
@@ -404,7 +439,7 @@
       if (token !== epoch) return;
       merge(value.symbols);
       if (value.missing.length) notes = [...notes, `${value.missing.length} requested reader identities are no longer in this index.`];
-      if (value.included.length) { await add(value.included); if (token === epoch) await fitGraph(); }
+      if (value.included.length) await add(value.included);
     } catch (cause) { if (token === epoch) fail(cause); }
   }
   $effect(() => { if (boardRequests.pending.length) untrack(() => { void acceptReaderRequests(boardRequests.take()); }); });
@@ -420,7 +455,7 @@
   function resizeCard(id: string, widthDelta: number, heightDelta: number) {
     nodes = nodes.map((node) => node.id === id && node.type === 'code' ? { ...node, width: Math.max(380, Math.min(4096, (node.width ?? node.measured?.width ?? 530) + widthDelta)), height: Math.max(190, Math.min(4096, (node.height ?? node.measured?.height ?? 310) + heightDelta)) } : node);
   }
-  function followSource(target: BoardSymbol, line?: number) { merge([target]); openCode(target.id, true, line ?? null); }
+  function followSource(target: BoardSymbol, line?: number, event?: MouseEvent) { merge([target]); openCode(target.id, true, line ?? null, event); }
   function toggleCard(id: string) {
     nodes = nodes.map((node) => {
       if (node.type !== 'code' || node.id !== id) return node;
@@ -429,19 +464,19 @@
     });
   }
   function readCard(id: string) { void tick().then(() => fitView({ nodes: [{ id }], padding: 0.25, maxZoom: 1.1, duration: 200 })); }
-  function openCode(id: string, fit = true, highlight: number | null = null) {
+  function openCode(id: string, activate = true, highlight: number | null = null, event?: MouseEvent) {
+    event?.stopPropagation();
     if (codeCount >= 32 && !nodes.some((node) => node.id === `code:${id}`)) { error = 'Close a source card before opening another (maximum 32).'; return; }
     if (new Set([...included, ...expanded, ...hidden, ...nodes.filter((node) => node.type === 'code').map((node) => node.data.symbolId), id]).size > 128) { error = 'This board already retains 128 symbol identities. Close a source-only card or start another board.'; return; }
     const item = model.symbol(id); const key = `code:${id}`;
     if (nodes.some((node) => node.id === key)) nodes = nodes.map((node) => node.id === key && node.type === 'code' ? { ...node, selected: true, zIndex: ++zIndex, data: { ...node.data, highlight } } : { ...node, selected: false });
     else {
-      const top = Math.max(820, ...nodes.filter((node) => node.type === 'symbol').map((node) => node.position.y + (node.measured?.height ?? 240) + 100));
-      nodes = [...nodes.map((node) => ({ ...node, selected: false })), { id: key, type: 'code', position: nextCodePosition(nodes.filter((node) => node.type === 'code'), top), width: 530, height: 310, selected: true, zIndex: ++zIndex, dragHandle: '.board-drag-handle', connectable: false,
+      nodes = [...nodes.map((node) => ({ ...node, selected: false })), { id: key, type: 'code', position: openingPosition(event), width: 530, height: 310, selected: true, zIndex: ++zIndex, dragHandle: '.board-drag-handle', connectable: false,
         data: { symbolId: id, symbol: item, collapsed: false, highlight, filters, follow: followSource, resize: resizeCard, close: closeCard, toggle: toggleCard, read: readCard } }];
     }
-    if (fit) { panel = null; evidence = null; readCard(key); void tick().then(() => boardElement?.querySelector<HTMLElement>(`[data-id="${CSS.escape(key)}"]`)?.focus()); }
+    if (activate) { panel = null; evidence = null; void tick().then(() => boardElement?.querySelector<HTMLElement>(`[data-id="${CSS.escape(key)}"]`)?.focus({ preventScroll: true })); }
   }
-  async function compare(edge: BoardEvidence) { openCode(edge.source, false, edge.line ?? null); openCode(edge.target, false); panel = null; evidence = null; await fitCode(); }
+  async function compare(edge: BoardEvidence) { openCode(edge.source, false, edge.line ?? null); openCode(edge.target, false); panel = null; evidence = null; }
   function tidy() {
     let x = 30; let y = 30; let height = 0;
     nodes = nodes.map((node) => { if (node.type !== 'symbol') return node; if (x > 900) { x = 30; y += height + 100; height = 0; }
@@ -651,17 +686,18 @@
     <div class="tools"><button disabled={busy || !adapter.resolveBoard || (!included.length && !codeCount && !expanded.length && !hidden.length)} onclick={refreshIndex}>Refresh index</button><button onclick={fitGraph}>Fit graph</button><button onclick={fitSelection}>Fit selection</button><button disabled={!codeCount} onclick={fitCode}>Fit code ({codeCount})</button><button onclick={tidy}>Tidy</button><button onclick={() => { setPanel('boards'); void listBoards(); }}>Saved boards</button><button onclick={newBoard}>New</button><button aria-expanded={helpOpen} onclick={() => helpOpen = !helpOpen}>Keyboard help</button></div>
   </div>
   <div class="visibility" aria-label="Board visibility filters"><span>Include:</span><label><input type="checkbox" bind:checked={includeTests} onchange={changeFilters} /> Tests</label><label><input type="checkbox" bind:checked={includeGenerated} onchange={changeFilters} /> Generated code</label><label><input type="checkbox" bind:checked={includeUncertain} onchange={changeFilters} /> Uncertain matches</label><span>Explicitly selected cards stay included.{#if exclusionLabel(excluded)} Excluded from loaded board: {exclusionLabel(excluded)}. Counts are disjoint in test → generated → uncertain order.{/if}</span></div>
-  {#if helpOpen}<section class="keyboard-help" aria-label="Board keyboard help"><b>Keyboard:</b> Tab to controls; Enter/Space activates. Focus a graph/source card and press Enter/Space to select it; arrow keys then move it (Shift for larger steps). Alt+G fits the graph, Alt+F fits selected cards, Alt+C fits code, Alt+A opens selection, Alt+Left returns in Connections, Ctrl/Cmd+S saves. Delete on a focused card hides it (or closes a source card). Escape closes the panel and restores focus. Source cards provide size buttons. Shift-click selects multiple cards.</section>{/if}
+  {#if helpOpen}<section class="keyboard-help" aria-label="Board keyboard help"><b>Keyboard:</b> Tab to controls; Enter/Space activates. Focus a graph/source card and press Enter/Space to select it; arrow keys then move it (Shift for larger steps). Alt+G fits the graph, Alt+F fits selected cards, Alt+C fits code, Alt+A opens selection, Alt+Left returns in Connections, Ctrl/Cmd+S saves. Delete on a focused card hides it (or closes a source card). Escape closes the panel and restores focus. Source cards provide size buttons. Right-drag empty canvas to pan; left-drag to select touched cards (Shift adds). Shift-click toggles cards; drag a selected header to move the group.</section>{/if}
   <div class="savebar"><input aria-label="Board name" placeholder="Name this board…" bind:value={boardName} maxlength={120} /><button disabled={readOnly || busy || saving || !boardName.trim()} onclick={() => save()}>Save</button><button disabled={readOnly || busy || saving || !boardName.trim()} onclick={() => save(true)}>Save as</button>
     <span>{dirty ? 'Unsaved changes' : boardId ? 'Saved' : 'New board'}{readOnly ? ` · ${boardList?.readOnlyReason ?? 'Read-only host'}` : ' · metadata only'}</span>
     <button onclick={exportBoard}>Export JSON</button><button disabled={!adapter.resolveBoard} onclick={() => importFile.click()}>Import JSON</button><input class="file-input" type="file" accept="application/json,.json" bind:this={importFile} onchange={importBoard} />
   </div>
   {#if error}<div class="error" role="alert">{error}<button onclick={() => error = ''} aria-label="Dismiss board error">×</button></div>{/if}
   {#if notes.length}<details class="bounds"><summary>Index boundaries / query limits ({notes.length})</summary>{#each notes as note}<p>{note}</p>{/each}</details>{/if}
-  <div class="canvas" aria-label="Review board canvas" role="group">
-    <SvelteFlow bind:nodes bind:viewport {edges} {nodeTypes} {edgeTypes} minZoom={0.15} maxZoom={1.6} nodesConnectable={false} deleteKey={[]} zoomOnDoubleClick={false} panOnDrag proOptions={{ hideAttribution: true }}
-      onnodeclick={({ node }) => { selected = node.type === 'symbol' ? node.id : model.targetState(node.data.symbolId, included, hidden).representative; if (node.type === 'code') nodes = nodes.map((item) => item.id === node.id ? { ...item, zIndex: ++zIndex } : item); }}
-      onedgeclick={({ edge }) => showEvidence(edge)} onselectionchange={({ edges: selectedEdges, nodes: selectedNodes }) => { reflectSourceSelection(selectedNodes); if (selectedEdges.length === 1) showEvidence(selectedEdges[0]!); }} onpaneclick={() => { selected = null; evidence = null; }}>
+  <div class="canvas" aria-label="Review board canvas" role="group" onpointerdowncapture={startPointerSelection} onpointercancel={() => { selectingRectangle = false; rectangleBase = []; rectangleOrigin = null; }}>
+    <SvelteFlow bind:nodes bind:viewport {edges} {nodeTypes} {edgeTypes} minZoom={0.15} maxZoom={1.6} nodesConnectable={false} deleteKey={[]} zoomOnDoubleClick={false} panOnDrag={[2]} panActivationKey={[]} selectionOnDrag selectionKey={[]} multiSelectionKey="Shift" selectionMode={SelectionMode.Partial} autoPanOnNodeFocus={false} proOptions={{ hideAttribution: true }}
+      onnodeclick={({ node, event }) => { if (!event.shiftKey) nodes = nodes.map((item) => ({ ...item, selected: item.id === node.id })); selected = node.type === 'symbol' ? node.id : model.targetState(node.data.symbolId, included, hidden).representative; if (node.type === 'code') nodes = nodes.map((item) => item.id === node.id ? { ...item, zIndex: ++zIndex } : item); }}
+      onselectionstart={() => { selectingRectangle = true; }} onselectionend={finishRectangleSelection}
+      onedgeclick={({ edge }) => showEvidence(edge)} onselectionchange={() => { retainRectangleSelection(); reflectSourceSelection(nodes.filter((node) => node.selected)); }} onpaneclick={() => { selected = null; evidence = null; }}>
       <Background gap={24} size={1} patternColor="var(--rule-soft)" /><Controls showLock={false} /><MiniMap pannable zoomable nodeColor={(node) => node.type === 'code' ? 'var(--press-2)' : 'var(--accent)'} />
     </SvelteFlow>
     {#if !included.length}<section class="empty"><h2>Choose what you want to understand</h2><p>Add symbols from this index. Connections helps you follow only the targets you choose.</p></section>{/if}
@@ -709,6 +745,8 @@
 {/if}
 
 <style>
+  /* Keep marquee-selected cards and the gaps between them directly interactive. */
+  .canvas :global(.svelte-flow__selection-wrapper), .canvas :global(.svelte-flow__selection-wrapper .svelte-flow__selection) { pointer-events: none; }
   .board { height: 100%; display: flex; flex-direction: column; color: var(--ink); background: var(--paper); }
   .toolbar, .savebar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 8px 14px; border-bottom: 1px solid var(--rule-soft); flex-shrink: 0; }
   .toolbar { justify-content: space-between; }

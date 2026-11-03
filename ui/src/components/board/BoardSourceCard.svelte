@@ -175,13 +175,13 @@
   const continuation = $derived(verified ? boardSourceContinuation(verified, source, current) : { previous: null, next: null });
   const owner = $derived(data.symbol.ownerId ? byId.get(data.symbol.ownerId) : undefined);
 
-  function follow(target: BoardSymbol, line?: number): void {
-    if (data.follow) data.follow(target, line);
+  function follow(target: BoardSymbol, line?: number, event?: MouseEvent): void {
+    if (data.follow) data.follow(target, line, event);
     else navigate(symbolHref(target.id, line === undefined ? {} : { line }));
   }
-  function followRef(ref: LineRef): void {
+  function followRef(ref: LineRef, event?: MouseEvent): void {
     const target = ref.targetId ? byId.get(ref.targetId) : undefined;
-    if (indexed && target) follow(target);
+    if (indexed && target) follow(target, undefined, event);
   }
   function canFocus(edge: BoardEvidence): boolean {
     return indexed && !!verified && edge.file === verified.file && Number.isSafeInteger(edge.line) && edge.line! >= verified.line && edge.line! <= verified.endLine!;
@@ -243,7 +243,7 @@
           {#if linksError}<p role="alert">{linksError}</p><button type="button" disabled={linksLoading} onclick={() => { if (context) void loadTargets(context, nextTargets ?? 0); }}>Retry references</button>{/if}
           {#each targets as row (row.target.id)}
             <div class="target">
-              <button type="button" class="target-link" title={`${row.target.kind} · ${row.target.qualifiedName} — ${row.target.file}:${row.target.line}`} onclick={() => follow(row.target)}>{row.target.qualifiedName} ↗</button>
+              <button type="button" class="target-link" title={`${row.target.kind} · ${row.target.qualifiedName} — ${row.target.file}:${row.target.line}`} onclick={(event) => follow(row.target, undefined, event)}>{row.target.qualifiedName} ↗</button>
               <span class="dim">{row.target.kind} · {row.target.file}:{row.target.line}</span>
               <span>Loaded kinds: {[...new Set(row.evidence.map((edge) => edge.kind))].join(', ') || 'none'} · {row.evidence.length} of {row.total} indexed relationships</span>
               <button type="button" aria-expanded={row.open} onclick={() => row.open = !row.open}>{row.open ? 'Hide' : 'Show'} evidence</button>
@@ -255,7 +255,7 @@
                       {#if boardEvidenceUncertain(edge)}<span class="dim"> · uncertain</span>{/if}
                       {#if edge.file}<a href={fileHref(edge.file, { source: true, ...(edge.line ? { line: edge.line } : {}) })}>{edge.file}{edge.line ? `:${edge.line}` : ''}</a>{:else}<span class="dim"> · no indexed source location</span>{/if}
                       {#if canFocus(edge)}<button type="button" onclick={() => focusSite(edge)}>Focus site</button>
-                      {:else if evidenceOrigin(edge)}<button type="button" onclick={() => { const origin = evidenceOrigin(edge); if (origin) follow(origin, edge.line); }}>Open evidence source</button>{/if}
+                      {:else if evidenceOrigin(edge)}<button type="button" onclick={(event) => { const origin = evidenceOrigin(edge); if (origin) follow(origin, edge.line, event); }}>Open evidence source</button>{/if}
                       <span class="dim">{edge.provenance ? `provenance ${edge.provenance}` : ''}{edge.confidence != null ? ` · confidence ${edge.confidence}` : ''}{edge.synthesizedBy ? ` · synthesized by ${edge.synthesizedBy}` : ''}{edge.via ? ` · via ${edge.via}` : ''}{edge.registeredAt ? ` · wired at ${edge.registeredAt}` : ''}{edge.resolvedBy ? ` · resolved by ${edge.resolvedBy}` : ''}</span>
                     </li>
                   {/each}

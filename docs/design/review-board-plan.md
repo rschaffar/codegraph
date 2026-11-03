@@ -66,9 +66,10 @@ make a diagram look complete.
   bounded preview is separate from included membership and never recursive.
 - Hide is reversible through Undo hide, named Hidden items and Restore actions
   in Connections, retaining geometry and identity.
-- Automatically lay out the initial selection, then allow free dragging. Adding
-  or expanding something must not rearrange the whole board. Tidy layout is an
-  explicit action.
+- Open new cards at the direct canvas click (slightly offset), or at the visible
+  canvas centre for menu/sidebar/keyboard actions; overlap is allowed. Adding or
+  expanding something must not rearrange the board or change pan/zoom. Tidy layout
+  is an explicit action.
 - Support pan, zoom, fit selection/board and a usable way back to readable code.
 - Allow several movable, resizable, collapsible source cards on the board, so
   methods can be compared side by side.
@@ -137,7 +138,12 @@ Evidence counts are indexed relationships/sites, never runtime execution frequen
 - Clicking an aggregate edge opens supporting original relationships, endpoint
   member identities, source locations when present and provenance. Source can
   open in a card or the existing Symbol/File view, with a route back to the board.
-- Drag a graph card by its header. Text selection, buttons and source scrolling
+- Right-button drag on empty canvas pans; starting on a card does not pan.
+  Left-button drag on empty canvas selects every touched card; Shift adds to the
+  selection. Plain click selects only that card, Shift-click toggles it, and an
+  empty click clears selection. Symbol and source cards share one selection;
+  dragging a selected header moves the group, while a plain click without a drag
+  selects only the clicked card. Text selection, buttons and source scrolling
   must not start a canvas pan or node drag. Remember manually positioned nodes.
 
 A large container's complete contents are not a useful default: prefer connected
@@ -150,8 +156,9 @@ A code card identifies its symbol, owner when present and current file:line.
 Cards are independent canvas items, not extra indexed graph nodes or code editors.
 Move, resize, collapse, close and bring to front independently; scrolling a
 card scrolls its source, not the board. Code links can open another card rather
-than replacing the entire scene. Selecting a card highlights the related graph
-symbol/evidence on the diagram. A fit/read action makes a card readable after
+than replacing the entire scene. Reopening an existing source card selects and
+raises it without moving it or the viewport, even when it is off-screen. Selecting
+a card highlights the related graph symbol/evidence on the diagram. A fit/read action makes a card readable after
 zooming out.
 
 Fetch source on demand through the existing source API and reuse syntax
@@ -212,9 +219,11 @@ lists, with truthful totals and continuation/**Show more**, never silent drops.
 
 Separate **what is selected**, **what the index currently says** and **how the
 reviewer arranged it**. Panning, dragging and reading source should not query
-or rewrite the graph. Initial layout is deterministic, not a constantly running
-physics simulation. Place newly revealed items near their owner while retaining
-hand-positioned content; only explicit Tidy is allowed to re-layout it all.
+or rewrite the graph. Placement is not a constantly running physics simulation.
+Direct on-card openings use the click location; menu/sidebar/keyboard openings use
+visible canvas centre (small deterministic offsets distinguish batch additions).
+Overlap is permitted and existing placements are retained; only explicit Tidy is
+allowed to re-layout it all.
 
 A versioned board file records name, explicitly included project-scoped symbol
 identities of any kind, hidden items, expansion/preview/filter settings, node/card
