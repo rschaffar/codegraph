@@ -29,3 +29,10 @@ export const relationLabels: Record<string, string> = {
   overrides: 'overrides', decorates: 'decorates', navigates: 'navigates to',
 };
 export function relationLabel(kind: string): string { return relationLabels[kind] ?? kindLabel(kind); }
+
+// Exact kinds keep their color across filtering, folding and selection. Unknown
+// kinds remain visible in neutral ink; never interpolate untrusted kind strings
+// into CSS. Hosts can override these Board-only tokens with the rest of the theme.
+export function relationColor(kind: string): string {
+  return edgeKinds.some((known) => known === kind) ? `var(--board-edge-${kind}, var(--ink-3))` : 'var(--ink-3)';
+}

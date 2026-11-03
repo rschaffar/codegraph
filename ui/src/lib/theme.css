@@ -50,6 +50,22 @@
      accent-soft, where --ink-3 was 4.10). */
   --code-comment: #6a675d;
 
+  /* Board-only relationship colors. Labels and evidence dashes carry meaning
+     independently of color; selection increases weight without changing hue. */
+  --board-edge-contains: #6a675d;
+  --board-edge-calls: #2463a6;
+  --board-edge-imports: #087d8b;
+  --board-edge-exports: #31733b;
+  --board-edge-extends: #7951a1;
+  --board-edge-implements: #b0448a;
+  --board-edge-references: #88700c;
+  --board-edge-type_of: #586aaf;
+  --board-edge-returns: #95612d;
+  --board-edge-instantiates: #c0521b;
+  --board-edge-overrides: #a03e4b;
+  --board-edge-decorates: #777c32;
+  --board-edge-navigates: #007c68;
+
   --sans: 'Archivo Variable', 'Archivo', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
   --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   --code-size: 12.5px;
@@ -87,6 +103,19 @@
     --amber: #d9a94a;
     --amber-soft: #2e2716;
     --code-comment: #8e8b81;
+    --board-edge-contains: #aaa69a;
+    --board-edge-calls: #78b4ef;
+    --board-edge-imports: #59c4d3;
+    --board-edge-exports: #91c981;
+    --board-edge-extends: #bca0e8;
+    --board-edge-implements: #e694c8;
+    --board-edge-references: #d5bc62;
+    --board-edge-type_of: #99aaee;
+    --board-edge-returns: #caa578;
+    --board-edge-instantiates: #f0a16a;
+    --board-edge-overrides: #ec8c96;
+    --board-edge-decorates: #b7c56a;
+    --board-edge-navigates: #59c6a8;
   }
 }
 
@@ -115,6 +144,19 @@
   --amber: #d9a94a;
   --amber-soft: #2e2716;
   --code-comment: #8e8b81;
+  --board-edge-contains: #aaa69a;
+  --board-edge-calls: #78b4ef;
+  --board-edge-imports: #59c4d3;
+  --board-edge-exports: #91c981;
+  --board-edge-extends: #bca0e8;
+  --board-edge-implements: #e694c8;
+  --board-edge-references: #d5bc62;
+  --board-edge-type_of: #99aaee;
+  --board-edge-returns: #caa578;
+  --board-edge-instantiates: #f0a16a;
+  --board-edge-overrides: #ec8c96;
+  --board-edge-decorates: #b7c56a;
+  --board-edge-navigates: #59c6a8;
   color-scheme: dark;
 }
 
@@ -140,6 +182,19 @@
   --amber: #8a5a0b;
   --amber-soft: #f3e9d2;
   --code-comment: #6a675d;
+  --board-edge-contains: #6a675d;
+  --board-edge-calls: #2463a6;
+  --board-edge-imports: #087d8b;
+  --board-edge-exports: #31733b;
+  --board-edge-extends: #7951a1;
+  --board-edge-implements: #b0448a;
+  --board-edge-references: #88700c;
+  --board-edge-type_of: #586aaf;
+  --board-edge-returns: #95612d;
+  --board-edge-instantiates: #c0521b;
+  --board-edge-overrides: #a03e4b;
+  --board-edge-decorates: #777c32;
+  --board-edge-navigates: #007c68;
   color-scheme: light;
 }
 

@@ -7,7 +7,7 @@
   import BoardRelationEdge from './BoardRelationEdge.svelte';
   import KindGlyph from '../KindGlyph.svelte';
   import { getGraphAdapter } from '../../lib/adapter';
-  import { cardFamily, edgeKinds, nodeKinds, kindLabel, relationLabel } from '../../lib/board-catalog';
+  import { cardFamily, edgeKinds, nodeKinds, kindLabel, relationLabel, relationColor } from '../../lib/board-catalog';
   import { createBoardModel, edgeLaneMap, mergeBoardFacts, isBoardEvidenceUncertain, BOARD_MEMBER_REVEAL_LIMIT, nextCodePosition, nextSymbolPosition, type BoardMemberPageState, type BoardSymbol, type BoardEvidence, type BoardRelation, type SymbolAction, type SymbolData, type SourceCardData } from '../../lib/board-model';
   import type { BoardSnapshot, BoardDocument, BoardLoaded, BoardList, BoardSearch, BoardConnections, BoardConnectionRequest, BoardGroups } from '../../lib/board-wire';
   import { live } from '../../lib/live.svelte';
@@ -108,10 +108,11 @@
     const lane = lanes.get(edge.id) ?? 0;
     const hot = evidence?.id === edge.id || (selectedSources.length ? edge.evidence.some((item) => related.evidenceIds.has(item.id)) : selected === edge.source || selected === edge.target);
     const uncertain = edge.evidence.some(isBoardEvidenceUncertain);
+    const color = relationColor(edge.kind);
     return { id: edge.id, source: edge.source, target: edge.target, sourceHandle: edge.sourceHandle, targetHandle: edge.targetHandle,
       type: 'relation', data: { relation: edge, lane }, label: `${relationLabel(edge.kind)}${edge.evidence.length > 1 ? ` · ${edge.evidence.length}` : ''}${edge.via ? ' · synthesized' : ''}${uncertain ? ' · uncertain' : ''}`,
-      markerEnd: { type: MarkerType.ArrowClosed, color: hot ? 'var(--accent)' : 'var(--ink-3)' },
-      style: `stroke:${hot ? 'var(--accent)' : 'var(--ink-3)'};stroke-width:${hot ? 2 : 1.2};${edge.via || uncertain ? 'stroke-dasharray:6 4;' : ''}`,
+      markerEnd: { type: MarkerType.ArrowClosed, color },
+      style: `stroke:${color};stroke-width:${hot ? 2.4 : 1.5};${edge.via || uncertain ? 'stroke-dasharray:6 4;' : ''}`,
       labelStyle: 'color:var(--ink-2);font:10px var(--mono);background:var(--paper);padding:4px 5px', interactionWidth: 20 };
   }));
   function merge(items: BoardSymbol[]) {

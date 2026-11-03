@@ -7,7 +7,7 @@
   import RelationEdge from '../components/board/BoardRelationEdge.svelte';
   import KindGlyph from '../components/KindGlyph.svelte';
   import { children, demoSymbols, initialSelection, symbol } from './demo-data';
-  import { cardFamily, edgeKinds, kindLabel, nodeKinds, relationLabel } from '../lib/board-catalog';
+  import { cardFamily, edgeKinds, kindLabel, nodeKinds, relationLabel, relationColor } from '../lib/board-catalog';
   import { browseConnections, filterSymbols, includeSymbols, nextCodePosition, nextSymbolPosition, projectBoard, targetState, memberOf,
     type BoardRelation, type BoardEvidence, type CodeCardData, type SymbolAction, type SymbolData } from './board-model';
 
@@ -62,12 +62,13 @@
     const parallels = projection.edges.filter((item) => item.source === edge.source && item.target === edge.target);
     const lane = edge.source === edge.target ? 320 + parallels.indexOf(edge) * 48 : (parallels.indexOf(edge) - (parallels.length - 1) / 2) * 56;
     const hot = evidence?.id === edge.id || selectedId === edge.source || selectedId === edge.target;
+    const color = relationColor(edge.kind);
     return {
       id: edge.id, source: edge.source, target: edge.target, sourceHandle: edge.sourceHandle, targetHandle: edge.targetHandle,
       type: 'relation', data: { relation: edge, lane },
       label: `${relationLabel(edge.kind)}${edge.evidence.length > 1 ? ` · ${edge.evidence.length}` : ''}${edge.via ? ' · heuristic' : ''}`,
-      markerEnd: { type: MarkerType.ArrowClosed, color: hot ? 'var(--accent)' : 'var(--ink-3)', width: 16, height: 16 },
-      style: `stroke:${hot ? 'var(--accent)' : 'var(--ink-3)'};stroke-width:${hot ? 2 : 1.2};${edge.via ? 'stroke-dasharray:6 4;' : ''}opacity:${selectedId && !hot ? 0.3 : 1}`,
+      markerEnd: { type: MarkerType.ArrowClosed, color, width: 16, height: 16 },
+      style: `stroke:${color};stroke-width:${hot ? 2.4 : 1.5};${edge.via ? 'stroke-dasharray:6 4;' : ''}opacity:${selectedId && !hot ? 0.3 : 1}`,
       labelStyle: 'color:var(--ink-2);font:10px var(--mono);background:var(--paper);padding:4px 5px', interactionWidth: 20,
     };
   }));
