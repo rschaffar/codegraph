@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
-  import { Background, Controls, MiniMap, SvelteFlow, MarkerType, SelectionMode, useSvelteFlow, type Edge, type Node } from '@xyflow/svelte';
+  import { Background, Controls, MiniMap, SvelteFlow, MarkerType, SelectionMode, useSvelteFlow, useStore, type Edge, type Node } from '@xyflow/svelte';
   import '@xyflow/svelte/dist/style.css';
   import BoardSymbolNode from './BoardSymbolNode.svelte';
   import BoardSourceCard from './BoardSourceCard.svelte';
@@ -15,6 +15,7 @@
 
   const adapter = getGraphAdapter();
   const { fitView, screenToFlowPosition, getIntersectingNodes } = useSvelteFlow();
+  const flow = $derived(useStore());
   const nodeTypes = { symbol: BoardSymbolNode, code: BoardSourceCard };
   const edgeTypes = { relation: BoardRelationEdge };
   type BoardNode = Node<SymbolData, 'symbol'> | Node<SourceCardData, 'code'>;
@@ -176,6 +177,8 @@
       nodes = nodes.map((node) => ({ ...node, selected: chosen.has(node.id) }));
     }
     rectangleOrigin = null; rectangleBase = []; selectingRectangle = false;
+    // Keep the selected cards, not Flow's persistent group bounding rectangle.
+    flow.selectionRectMode = null;
   }
   function retainRectangleSelection() {
     if (selectingRectangle && rectangleBase.some((id) => nodes.some((node) => node.id === id && !node.selected))) {
@@ -745,6 +748,8 @@
 {/if}
 
 <style>
+  /* Only the active marquee is visible; selection remains on the cards after release. */
+  .canvas :global(.svelte-flow__selection) { background: transparent; }
   /* Keep marquee-selected cards and the gaps between them directly interactive. */
   .canvas :global(.svelte-flow__selection-wrapper), .canvas :global(.svelte-flow__selection-wrapper .svelte-flow__selection) { pointer-events: none; }
   .board { height: 100%; display: flex; flex-direction: column; color: var(--ink); background: var(--paper); }

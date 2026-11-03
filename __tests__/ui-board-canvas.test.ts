@@ -199,6 +199,22 @@ describe('Board pointer interactions and placement', () => {
     expect(host.querySelector('[aria-label="Relationship evidence"]')).toBeNull();
   });
 
+  it('removes the marquee on release and retains enclosed and touched cards', async () => {
+    records.get('a')!.document.viewport = { x: 0, y: 0, zoom: 1 };
+    await render(); await open();
+    const pane = host.querySelector('.svelte-flow__pane')!;
+    // Enclose Alpha entirely and touch only Beta's top-left corner.
+    pointer(pane, 'pointerdown', 140, 240); await settle();
+    pointer(pane, 'pointermove', 610, 510); await settle();
+    const marquee = host.querySelector<HTMLElement>('.svelte-flow__selection')!;
+    expect(marquee).not.toBeNull();
+    pointer(pane, 'pointerup', 610, 510); await settle();
+    expect(selectedIds()).toEqual(['a', 'b']);
+    expect(marquee.isConnected).toBe(false);
+    expect(host.querySelector('.svelte-flow__selection')).toBeNull();
+    expect(host.querySelector('.svelte-flow__selection-wrapper')).toBeNull();
+  });
+
   it('pans with the right mouse button on empty canvas but not on cards', async () => {
     const initialView = { x: 0, y: 0, zoom: 1 }; records.get('a')!.document.viewport = initialView;
     await render(); await open();

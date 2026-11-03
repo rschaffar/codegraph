@@ -139,9 +139,10 @@ Evidence counts are indexed relationships/sites, never runtime execution frequen
   member identities, source locations when present and provenance. Source can
   open in a card or the existing Symbol/File view, with a route back to the board.
 - Right-button drag on empty canvas pans; starting on a card does not pan.
-  Left-button drag on empty canvas selects every touched card; Shift adds to the
-  selection. Plain click selects only that card, Shift-click toggles it, and an
-  empty click clears selection. Symbol and source cards share one selection;
+  Left-button drag on empty canvas draws an unfilled outline and selects every
+  enclosed or touched card; Shift adds to the selection. The outline disappears
+  on release, leaving only the individual cards selected. Plain click selects
+  only that card, Shift-click toggles it, and an empty click clears selection. Symbol and source cards share one selection;
   dragging a selected header moves the group, while a plain click without a drag
   selects only the clicked card. Text selection, buttons and source scrolling
   must not start a canvas pan or node drag. Remember manually positioned nodes.
