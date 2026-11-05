@@ -17,7 +17,7 @@
 import type { Node } from '../types';
 import type { ResolutionContext, ResolvedRef, UnresolvedRef } from './types';
 import { escapeRegExp } from '../utils';
-import { csharpDeclarationHead, csharpDeclarationNameEnd } from './csharp-declaration';
+import { csharpClosingBracket, csharpDeclarationHead, csharpDeclarationNameEnd } from './csharp-declaration';
 
 const GENERIC_LANGUAGES: ReadonlySet<string> = new Set([
   'scala', 'java', 'kotlin', 'csharp', 'typescript', 'tsx', 'swift', 'rust', 'dart', 'go', 'cpp', 'vbnet', 'arkts',
@@ -36,11 +36,15 @@ const HEAD_LINES = 40;
 
 const memos = new WeakMap<ResolutionContext, Map<string, ReadonlyMap<string, string | undefined>>>();
 const scopeMemos = new WeakMap<ResolutionContext, Map<string, ReadonlySet<string>>>();
+// Complete C# evidence is separate from the legacy best-effort name set: a
+// missing/unreadable declaration must not prove that a namesake is in scope.
+const csharpEvidenceMemos = new WeakMap<ResolutionContext, Map<string, ReadonlySet<string> | null>>();
 
 /** Drop the memos (see ReferenceResolver.clearCaches). */
 export function clearTypeParameterMemos(context: ResolutionContext): void {
   memos.delete(context);
   scopeMemos.delete(context);
+  csharpEvidenceMemos.delete(context);
   valueMemos.delete(context);
 }
 
@@ -177,6 +181,62 @@ export function typeParametersInScope(node: Node, context: ResolutionContext): R
   }
   memo.set(node.id, names);
   return names;
+}
+
+/** Complete C# generic-shadow evidence, or null if a declaration is opaque.
+ * This stricter consumer does not change other languages' legacy gating. */
+export function csharpTypeParametersInScope(node: Node, context: ResolutionContext): ReadonlySet<string> | null {
+  if (node.language !== 'csharp') return null;
+  let memo = csharpEvidenceMemos.get(context);
+  if (!memo) csharpEvidenceMemos.set(context, (memo = new Map()));
+  const key = `scope:${node.id}`;
+  if (memo.has(key)) return memo.get(key)!;
+  const names = new Set<string>();
+  for (const declaration of enclosingDeclarations({ filePath: node.filePath, line: node.startLine, column: node.startColumn }, context)) {
+    if (declaration.language !== 'csharp') continue;
+    const declaredKey = `declaration:${declaration.id}`;
+    if (!memo.has(declaredKey)) memo.set(declaredKey, csharpDeclarationParameters(declaration, context));
+    const declared = memo.get(declaredKey)!;
+    if (declared === null) { memo.set(key, null); return null; }
+    for (const name of declared) names.add(name);
+  }
+  memo.set(key, names);
+  return names;
+}
+
+function csharpDeclarationParameters(node: Node, context: ResolutionContext): ReadonlySet<string> | null {
+  const head = csharpDeclarationHead(node, context, HEAD_LINES);
+  const end = head === null ? null : csharpDeclarationNameEnd(head, node);
+  if (head === null || end === null) return null;
+  let at = end;
+  while (/\s/.test(head[at] ?? '') && at < head.length) at++;
+  const names = new Set<string>();
+  // A clipped whitespace/comment tail cannot prove absence of a generic
+  // list. Require the declaration's visible non-generic continuation.
+  if (at >= head.length) return null;
+  if (head[at] !== '<') return /[:({;]/.test(head[at]!) ? names : null;
+  const close = csharpClosingBracket(head, at);
+  if (close < 0) return null;
+  at++;
+  while (at < close) {
+    while (/\s/.test(head[at] ?? '') && at < close) at++;
+    while (head[at] === '[') {
+      const attribute = csharpClosingBracket(head, at);
+      if (attribute < 0 || attribute >= close) return null;
+      at = attribute + 1;
+      while (/\s/.test(head[at] ?? '') && at < close) at++;
+    }
+    const parameter = /^(?:(?:in|out)\s+)?@?([A-Za-z_]\w*)/.exec(head.slice(at, close));
+    if (!parameter || names.has(parameter[1]!)) return null;
+    names.add(parameter[1]!);
+    at += parameter[0].length;
+    while (/\s/.test(head[at] ?? '') && at < close) at++;
+    if (at === close) return names;
+    if (head[at] !== ',') return null;
+    at++;
+    if (!head.slice(at, close).trim()) return null;
+  }
+  return null;
 }
 
 /** The type parameters a declaration declares, each with the default a C++ head gives it (`typename Parser = TcParser`). */

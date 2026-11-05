@@ -91,6 +91,24 @@ export function blankCsharpTrivia(text: string): string {
   return out.join('');
 }
 
+/** Only leading declaration modifiers count; body identifiers and attributes
+ * cannot override access evidence. Null means the head could not be read. */
+export function csharpDeclarationModifiers(node: Node, context: ResolutionContext): ReadonlySet<string> | null {
+  let head = csharpDeclarationHead(node, context)?.trimStart();
+  if (head === undefined) return null;
+  while (head.startsWith('[')) {
+    const close = csharpClosingBracket(head, 0);
+    if (close < 0) return null;
+    head = head.slice(close + 1).trimStart();
+  }
+  const modifiers = new Set<string>();
+  const known = /^(public|private|protected|internal|new|static|virtual|override|sealed|abstract|partial|unsafe|extern|readonly|required)\b\s*/;
+  for (let match; (match = known.exec(head)); head = head.slice(match[0].length)) modifiers.add(match[1]!);
+  // Reaching the bounded head's end after attributes/modifiers is opaque,
+  // not a complete declaration with implicitly public visibility.
+  return head.trim() ? modifiers : null;
+}
+
 /** Structural matching. Angles are structural only in a requested type-parameter list. */
 export function csharpClosingBracket(text: string, open: number): number {
   const pairs: Record<string, string> = { '(': ')', '[': ']', '{': '}' };

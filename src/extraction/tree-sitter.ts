@@ -6921,6 +6921,39 @@ export class TreeSitterExtractor {
     }
   }
 
+  /** C# value-member candidates keep their receiver, distinct from type refs.
+   * Only typed property lookup may resolve them; method/name guesses may not. */
+  private extractCsharpPropertyRef(node: SyntaxNode, parent?: SyntaxNode | null): void {
+    if (this.language !== 'csharp' || node.type !== 'member_access_expression') return;
+    if (parent?.type === 'invocation_expression') {
+      const callee = getChildByField(parent, 'function');
+      if (callee?.startIndex === node.startIndex && callee.endIndex === node.endIndex) return;
+    }
+    const parts: string[] = [];
+    let current = node;
+    for (let depth = 0; current.type === 'member_access_expression'; depth++) {
+      if (depth >= 16 || current.hasError || current.isMissing ||
+          !current.children.some(child => child.type === '.')) return;
+      const receiver = getChildByField(current, 'expression');
+      const member = getChildByField(current, 'name');
+      if (!receiver || member?.type !== 'identifier') return;
+      parts.push(getNodeText(member, this.source));
+      current = receiver;
+    }
+    if (current.hasError || current.isMissing || !['identifier', 'this', 'base'].includes(current.type)) return;
+    parts.push(getNodeText(current, this.source));
+    const ownerId = this.nodeStack[this.nodeStack.length - 1];
+    const member = getChildByField(node, 'name');
+    if (!ownerId || !member) return;
+    this.unresolvedReferences.push({
+      fromNodeId: ownerId,
+      referenceName: parts.reverse().join('.'),
+      referenceKind: 'property_ref',
+      line: member.startPosition.row + 1,
+      column: member.startPosition.column,
+    });
+  }
+
   private pushStaticMemberRef(name: string, ownerId: string, node: SyntaxNode): void {
     this.unresolvedReferences.push({
       fromNodeId: ownerId,
@@ -7746,6 +7779,7 @@ export class TreeSitterExtractor {
 
       // Static-member / value-read: `Enum.value`, `Type.CONST`, `Foo::BAR`.
       this.extractStaticMemberRef(node, parent);
+      this.extractCsharpPropertyRef(node, parent);
 
       // A member read that may run code — Dart's `x.area` calls the getter
       // `area` (#2338). The resolver links it to a getter, as a call, or to

@@ -5,7 +5,7 @@
  * that only reads an index doesn't load it. See that file for why.
  */
 
-export { ExtractionOrchestrator, extractFromSource } from './extraction';
+export { ExtractionOrchestrator, extractFromSource, CSHARP_PROPERTY_REFRESH_PENDING, CSHARP_PROPERTY_PAGE_SIZE } from './extraction';
 export { changedModuleConfigs, changedRoutes, createResolver, moduleConfigLanguages, parseModuleConfigSnapshot } from './resolution';
 export { hasSynthesisPattern, isJsxChildCandidate } from './resolution/callback-synthesizer';
 export { aliasMayName } from './resolution/const-alias-synthesizer';

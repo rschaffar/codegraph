@@ -17,7 +17,7 @@
  * path instead of mis-decoding.
  */
 
-export const KERNEL_ABI_VERSION = 2;
+export const KERNEL_ABI_VERSION = 3;
 
 /** Sentinel for "absent" in u32 slots and string-ref offsets. */
 export const NONE = 0xffffffff;
@@ -76,7 +76,7 @@ export const EDGE = {
 /** ref row byte offsets */
 export const REF = {
   fromIdx: 0, // u32 (NONE → fromIdStr)
-  kind: 4, // u8 — EDGE_KINDS index, or FUNCTION_REF_CODE
+  kind: 4, // u8 — EDGE_KINDS index, FUNCTION_REF_CODE or PROPERTY_REF_CODE
   flags: 5, // u8 — REF_FLAGS bits (v2)
   line: 8, // u32
   column: 12, // u32
@@ -87,6 +87,8 @@ export const REF = {
 
 /** ReferenceKind wire code for the internal-only `function_ref` (#756). */
 export const FUNCTION_REF_CODE = 200;
+/** Internal receiver-qualified C# property candidate; resolves to `references`. */
+export const PROPERTY_REF_CODE = 201;
 
 /**
  * Ref-row flag bits (v2). FILE_PATH: the ref carries `filePath` = the

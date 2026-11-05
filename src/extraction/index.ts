@@ -131,6 +131,9 @@ export interface IndexResult {
 /** The languages whose modules pass bindings on with `export … from` (#2978). */
 const RE_EXPORTING_LANGUAGES = new Set<string>(['typescript', 'tsx', 'javascript', 'jsx']);
 
+export const CSHARP_PROPERTY_REFRESH_PENDING = 'csharp_property_refresh_pending';
+export const CSHARP_PROPERTY_PAGE_SIZE = 2000;
+
 /**
  * Result of a sync operation
  */
@@ -184,6 +187,8 @@ export interface SyncResult {
    * plain `import` leaves this empty.
    */
   reExportsChangedFilePaths?: string[];
+  /** Qualified C# namespace/type lookup shape, including declaration multiplicity. */
+  csharpLookupChanged?: boolean;
   /** Tracked files this sync found gone and deleted from the index. */
   removedFilePaths?: string[];
   /**
@@ -3378,6 +3383,10 @@ export class ExtractionOrchestrator {
       }
     }
 
+    // Synchronous and durable BEFORE any replacement or awaited pre-store
+    // work. A stopped run must not lose the obligation when its hash commits.
+    if (language === 'csharp' || existingFile?.language === 'csharp') this.markCsharpPropertyRefreshPending();
+
     // Re-decided on every re-index of a changed file, so a banner added (or
     // removed) by an edit is reflected on the next sync (#1500). Computed after
     // the unchanged-file early return so untouched files pay nothing.
@@ -3671,8 +3680,8 @@ export class ExtractionOrchestrator {
 
   /**
    * Re-open resolution edges whose answer was READ from a file this sync
-   * touched, although neither end of the edge changed: a python attribute typed
-   * through a factory or a base class in another file records those files as
+   * touched, although neither end of the edge changed: Python attribute types
+   * record those files as
    * `metadata.typeFrom`. The definition delta cannot see these — editing what a
    * factory returns, or what a base `__init__` assigns, adds or removes no
    * definition — so without this a synced index keeps the old type forever.
@@ -3683,23 +3692,56 @@ export class ExtractionOrchestrator {
     const touched = new Set(touchedPaths.filter((p) => /\.pyi?$/.test(p)));
     if (touched.size === 0) return [];
     const alreadyFresh = new Set(changedFilePaths);
-
-    const edgeIds: number[] = [];
-    const refs: UnresolvedReference[] = [];
+    const edgeIds: number[] = [], refs: UnresolvedReference[] = [];
     const files = new Set<string>();
-    for (const e of this.queries.getEdgesWithTypeFrom()) {
-      if (alreadyFresh.has(e.sourceFilePath)) continue;
-      const from = e.metadata?.typeFrom;
-      if (!Array.isArray(from) || !from.some((f) => typeof f === 'string' && touched.has(f))) continue;
-      const ref = resurrectRefFromDroppedEdge(e);
+    for (const edge of this.queries.getEdgesWithTypeFrom()) {
+      const from = edge.metadata?.typeFrom;
+      if (alreadyFresh.has(edge.sourceFilePath) || !Array.isArray(from) ||
+          !from.some(file => typeof file === 'string' && touched.has(file))) continue;
+      const ref = resurrectRefFromDroppedEdge(edge);
       if (!ref) continue;
-      edgeIds.push(e.edgeId);
-      refs.push(ref);
-      files.add(e.sourceFilePath);
+      edgeIds.push(edge.edgeId); refs.push(ref); files.add(edge.sourceFilePath);
     }
-    if (refs.length === 0) return [];
     this.queries.replaceResolutionEdgesWithUnresolvedRefs(edgeIds, refs);
     return [...files];
+  }
+
+  private markCsharpPropertyRefreshPending(): void {
+    if (this.queries.getMetadata(CSHARP_PROPERTY_REFRESH_PENDING) !== '1') {
+      this.queries.setMetadata(CSHARP_PROPERTY_REFRESH_PENDING, '1');
+    }
+  }
+
+  /** C# maintenance is awaited only after extraction settles. Keep original
+   * reference resurrection atomic, with yields/pressure between bounded pages. */
+  async resurrectCsharpPropertyEdges(paths: string[], changedPaths: string[], lookupChanged: boolean,
+    onBoundary: MaybeYield = createYielder(), pageSize = CSHARP_PROPERTY_PAGE_SIZE): Promise<void> {
+    const alreadyFresh = new Set(changedPaths);
+    let after = 0;
+    for (;;) {
+      const page = this.queries.getCsharpPropertyTypeEdgesPage(paths, after, pageSize, lookupChanged);
+      if (page.cursor === after) break;
+      after = page.cursor;
+      const ids: number[] = [], refs: UnresolvedReference[] = [];
+      for (const edge of page.edges) {
+        if (alreadyFresh.has(edge.sourceFilePath)) continue;
+        const ref = resurrectRefFromDroppedEdge(edge);
+        if (!ref) continue;
+        ids.push(edge.edgeId); refs.push(ref);
+      }
+      if (refs.length) this.queries.replaceResolutionEdgesWithUnresolvedRefs(ids, refs);
+      await onBoundary();
+    }
+    // The cycle-terminating file closure is O(reachable files), not constant
+    // work. Only its failed property rows are reopened in candidate windows.
+    const files = this.queries.getCsharpPropertyRetryFiles(paths, lookupChanged).filter(file => !alreadyFresh.has(file));
+    after = 0;
+    for (;;) {
+      const page = this.queries.reopenFailedCsharpPropertyPage(files, after, pageSize);
+      if (page.after === after) break;
+      after = page.after;
+      await onBoundary();
+    }
   }
 
   /**
@@ -3893,6 +3935,7 @@ export class ExtractionOrchestrator {
     // BEFORE their nodes are replaced/deleted. Compared against the post-store
     // pairs below to derive `definitionDelta` (CG-33).
     const pairsBefore = new Set<string>();
+    const csharpShapeBefore = new Map<string, number>();
     // Importers' import statements, read once per sync for the files it removes.
     const importReader = createImportReader(this.rootDir);
 
@@ -3978,6 +4021,8 @@ export class ExtractionOrchestrator {
     let reconcileChecks = 0;
     const spanInvalidation: DotnetSpanInvalidation = { onYield: createYielder() };
     const removeTracked = async (tracked: FileRecord): Promise<void> => {
+      if (tracked.language === 'csharp') this.markCsharpPropertyRefreshPending();
+      for (const [identity, count] of this.queries.getCsharpLookupShapeByFiles([tracked.path])) csharpShapeBefore.set(identity, count);
       await this.reopenDotnetSpanCalls(tracked.path, tracked.language, [], spanInvalidation);
       // Before the cascade deletes them, resurrect incoming cross-file
       // resolution edges as their original refs (#1240 removal case): the
@@ -4105,6 +4150,7 @@ export class ExtractionOrchestrator {
     // definition set is readable (CG-33).
     if (filesToIndex.length > 0) {
       for (const pair of this.queries.getNodeNamePairsByFiles(filesToIndex)) pairsBefore.add(pair);
+      for (const [identity, count] of this.queries.getCsharpLookupShapeByFiles(filesToIndex)) csharpShapeBefore.set(identity, count);
     }
     // The `export … from` statements of each file, before the store replaces
     // its import nodes (#2978).
@@ -4166,6 +4212,9 @@ export class ExtractionOrchestrator {
     for (const pair of pairsBefore) if (!pairsAfter.has(pair)) deltaNames.add(nameOf(pair));
     for (const pair of pairsAfter) if (!pairsBefore.has(pair)) deltaNames.add(nameOf(pair));
     const definitionDelta = [...deltaNames];
+    const csharpShapeAfter = this.queries.getCsharpLookupShapeByFiles(filesToIndex);
+    const csharpLookupChanged = csharpShapeBefore.size !== csharpShapeAfter.size ||
+      [...csharpShapeBefore].some(([identity, count]) => csharpShapeAfter.get(identity) !== count);
 
     // Modified ES modules whose `export … from` statements changed (#2978): a
     // re-export retargeted, removed or passing other names on changes what
@@ -4199,6 +4248,7 @@ export class ExtractionOrchestrator {
       ...(failedFilePaths.length > 0 ? { failedFilePaths } : {}),
       definitionDelta: definitionDelta.length > 0 ? definitionDelta : undefined,
       ...(reExportsChanged.length > 0 ? { reExportsChangedFilePaths: reExportsChanged } : {}),
+      csharpLookupChanged,
       ...(removedFilePaths.length > 0 ? { removedFilePaths } : {}),
       ...(detectedFrameworks ? { detectedFrameworks } : {}),
     };
