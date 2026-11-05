@@ -68,7 +68,7 @@
 //!   24  str  candidates (NUL-joined list)
 //!   32  str  fromNodeIdStr
 
-pub const KERNEL_ABI_VERSION: u8 = 2;
+pub const KERNEL_ABI_VERSION: u8 = 3;
 pub const NONE: u32 = 0xFFFF_FFFF;
 
 pub const META_SIZE: usize = 36;
@@ -122,6 +122,8 @@ pub const EDGE_KINDS: [&str; 13] = [
 
 /// ReferenceKind code for the internal-only `function_ref` (#756).
 pub const FUNCTION_REF_CODE: u8 = 200;
+/// Internal receiver-qualified C# property candidate; resolves to references.
+pub const PROPERTY_REF_CODE: u8 = 201;
 
 /// Ref-row flag bit 0: the ref carries `filePath` = the extracted file.
 pub const REF_FLAG_FILE_PATH: u8 = 1;

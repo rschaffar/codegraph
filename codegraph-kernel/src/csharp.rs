@@ -18,6 +18,7 @@
 use crate::buffers::{
     build_meta, edge_kind_index, node_kind_index, Arena, BoolFlags, EdgeRow, EmitOut, NodeRow,
     RefRow, StrRef, Tables, FLAG_IS_ASYNC, FLAG_IS_EXPORTED, FLAG_IS_STATIC, FUNCTION_REF_CODE,
+    PROPERTY_REF_CODE,
     NONE, NONE_STR,
 };
 use crate::docstring::preceding_docstring;
@@ -310,6 +311,61 @@ impl<'t> Walker<'t> {
             .last()
             .map(|s| matches!(s.kind, "class" | "struct" | "interface" | "trait" | "enum" | "module"))
             .unwrap_or(false)
+    }
+
+    /// A value member retains its receiver until typed property lookup proves a target.
+    /// Mirrored by extractCsharpPropertyRef; unsupported paths never become suffix guesses.
+    fn extract_property_ref(&mut self, node: Node<'t>) {
+        if node.kind() != "member_access_expression" || self.stack.is_empty() {
+            return;
+        }
+        if let Some(parent) = node.parent() {
+            if parent.kind() == "invocation_expression"
+                && parent
+                    .child_by_field_name("function")
+                    .is_some_and(|callee| callee == node)
+            {
+                return;
+            }
+        }
+        let mut parts = Vec::new();
+        let mut current = node;
+        let mut depth = 0;
+        while current.kind() == "member_access_expression" {
+            if depth >= 16 || current.has_error() || current.is_missing() {
+                return;
+            }
+            let mut cursor = current.walk();
+            if !current
+                .children(&mut cursor)
+                .any(|child| child.kind() == ".")
+            {
+                return;
+            }
+            let (Some(receiver), Some(member)) = (
+                current.child_by_field_name("expression"),
+                current.child_by_field_name("name"),
+            ) else {
+                return;
+            };
+            if member.kind() != "identifier" {
+                return;
+            }
+            parts.push(self.text(member));
+            current = receiver;
+            depth += 1;
+        }
+        if current.has_error()
+            || current.is_missing()
+            || !matches!(current.kind(), "identifier" | "this" | "base")
+        {
+            return;
+        }
+        parts.push(self.text(current));
+        parts.reverse();
+        if let Some(member) = node.child_by_field_name("name") {
+            self.push_ref_at(self.top_row(), &parts.join("."), PROPERTY_REF_CODE, member);
+        }
     }
 
     fn push_ref(&mut self, from_row: u32, name: &str, kind_code: u8, line: u32, column: u32) {
@@ -683,6 +739,7 @@ impl<'t> Walker<'t> {
 
         // Static value reads (`ReadType.ReadAsDouble`) — body walker only.
         self.extract_static_member_ref(node);
+        self.extract_property_ref(node);
 
         // (variable_declarator type-annotation branch: C# has no
         // `type_annotation` child node — structurally inert, not ported.

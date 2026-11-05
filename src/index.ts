@@ -40,6 +40,8 @@ import {
 } from './directory';
 import {
   ExtractionOrchestrator,
+  CSHARP_PROPERTY_REFRESH_PENDING,
+  CSHARP_PROPERTY_PAGE_SIZE,
   IndexProgress,
   IndexResult,
   SyncResult,
@@ -785,6 +787,15 @@ export class CodeGraph {
           if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[synth-timing] deferredThisMember: ${Date.now() - tDeferred}ms`);
         }
 
+        // Shared main-thread stores arm this before changing C# facts. A fresh
+        // index has already resolved every occurrence; existing graphs may have
+        // authoritative old edges that were never queued by the full pass.
+        if (result.success && result.filesIndexed > 0 && !options.signal?.aborted &&
+            this.queries.getMetadata(CSHARP_PROPERTY_REFRESH_PENDING) === '1') {
+          if (freshDb) this.queries.setMetadata(CSHARP_PROPERTY_REFRESH_PENDING, '0');
+          else await this.refreshCsharpPropertyReferences([], [], true, walValve ? () => walValve!.backpressure() : undefined);
+        }
+
         // Refresh planner stats + checkpoint the WAL after bulk writes.
         // Off-thread (worker connection): on a multi-GB index this is minutes
         // of IO, and inline it starved the #850 watchdog AFTER a fully
@@ -1086,6 +1097,8 @@ export class CodeGraph {
         const fullReconcile = !options.paths || options.paths.length === 0;
         const gitState = this.orchestrator.beginGitIndexState(fullReconcile);
 
+        const csharpRefreshAtStart = this.queries.getMetadata(CSHARP_PROPERTY_REFRESH_PENDING) === '1';
+        const oldCsharpPaths = new Set<string>();
         const pythonFilesBefore = this.pythonFilePaths();
         // An interrupted index may have absorbed its changed files before
         // resolution/synthesis. Detect those orphans BEFORE this sync adds refs.
@@ -1100,6 +1113,7 @@ export class CodeGraph {
         let routesBefore = null as Node[] | null;
         const result = await this.orchestrator.sync(options.onProgress, options.paths, backpressure,
           (filePath, content) => {
+            if (this.queries.getFileByPath(filePath)?.language === 'csharp') oldCsharpPaths.add(filePath);
             if (watchRoutes && routesBefore === null) routesBefore = this.queries.getNodesByKind('route');
             if (!refreshSynthesis && (this.queries.hasSynthesizedEdgesTouchingFile(filePath) ||
               this.queries.wasSynthesisInput(filePath) ||
@@ -1144,6 +1158,10 @@ export class CodeGraph {
         // pre-removal graph.)
         if (result.filesAdded > 0 || result.filesModified > 0 || result.filesRemoved > 0) {
           this.resolver.runPostExtract();
+        } else if (csharpRefreshAtStart) {
+          // No-change recovery still reads declarations committed by a stopped
+          // run. Discard stable-source views before prerequisites/orphans run.
+          this.resolver.clearCaches();
         }
 
         // A route that appeared, went away or was renamed changes what a
@@ -1597,6 +1615,19 @@ export class CodeGraph {
           }
         }
 
+        // Property targets depend on declarations in other files, even when
+        // symbol names/ids did not change. This is typed-evidence maintenance,
+        // not the optional name-guessing rebind controlled by NO_REBIND.
+        const touchedCsharp = [...new Set([...oldCsharpPaths, ...(result.changedFilePaths ?? []), ...(result.removedFilePaths ?? [])])]
+          .filter(file => oldCsharpPaths.has(file) || /\.cs$/i.test(file) || this.queries.getFileByPath(file)?.language === 'csharp');
+        const propertyRefreshPending = this.queries.getMetadata(CSHARP_PROPERTY_REFRESH_PENDING) === '1';
+        const propertyRefreshRan = touchedCsharp.length > 0 || propertyRefreshPending;
+        if (propertyRefreshRan) {
+          const recovery = csharpRefreshAtStart || propertyRefreshPending && touchedCsharp.length === 0;
+          await this.refreshCsharpPropertyReferences(touchedCsharp, recovery ? [] : result.changedFilePaths ?? [],
+            recovery || result.csharpLookupChanged === true, backpressure);
+        }
+
         if (filesChanged || orphanCount > 0) {
           // Second pass: chained calls whose method lives on a supertype the
           // receiver conforms to (protocol-extension / inherited). Needs the
@@ -1616,7 +1647,7 @@ export class CodeGraph {
 
         // Refresh planner stats + checkpoint the WAL after bulk writes.
         // Off-thread — see indexAll's call site.
-        if (filesChanged || result.filesRemoved > 0 || orphanCount > 0 || refreshSynthesis) {
+        if (filesChanged || result.filesRemoved > 0 || orphanCount > 0 || refreshSynthesis || propertyRefreshRan) {
           await this.db.runMaintenance();
         }
 
@@ -1657,6 +1688,32 @@ export class CodeGraph {
         this.fileLock.release();
       }
     });
+  }
+
+  /** This phase runs under the existing writer lock, after stores and
+   * prerequisites settle. Never retain a project-sized ref/result array. */
+  private async refreshCsharpPropertyReferences(paths: string[], changedPaths: string[], lookupChanged: boolean,
+    backpressure?: () => Promise<void> | null): Promise<void> {
+    const started = Date.now(), yieldIfDue = createYielder();
+    const boundary = async () => {
+      const pause = backpressure?.();
+      if (pause) await pause;
+      await yieldIfDue();
+    };
+    await this.orchestrator.resurrectCsharpPropertyEdges(paths, changedPaths, lookupChanged, boundary);
+    let after = 0, attempted = 0;
+    for (;;) {
+      const page = this.queries.getPendingCsharpPropertyReferencesAfter(after, CSHARP_PROPERTY_PAGE_SIZE);
+      if (!page.length) break;
+      after = page[page.length - 1]!.rowId!;
+      await this.resolver.resolveAndPersistListYielding(page);
+      attempted += page.length;
+      await boundary();
+    }
+    // Not a finally: failures leave the obligation armed for a conservative
+    // replay, including when the next sync observes no changed paths.
+    this.queries.setMetadata(CSHARP_PROPERTY_REFRESH_PENDING, '0');
+    if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[phase-timing] sync-csharp-properties: ${Date.now() - started}ms (${attempted} refs)`);
   }
 
   /**

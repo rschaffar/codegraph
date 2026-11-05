@@ -18,6 +18,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixes
 
+- C# property uses through locally resolved receiver types now appear in callers and incoming connections; re-index to populate the new links.
 - C# member calls split around the dot or separated by comments now index like their single-line equivalents, with source navigation pointing at the method name after re-indexing.
 - Span conversions on receivers of unknown type no longer link to an unrelated .NET project method just because it shares the same name, while supported project extensions remain linked and declaration edits refresh those links; re-index to remove old false links.
 - C# attributes and string literals no longer confuse generic type names or override matching.

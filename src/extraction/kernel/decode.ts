@@ -22,6 +22,7 @@ import {
   EDGE_ROW_SIZE,
   FLAG,
   FUNCTION_REF_CODE,
+  PROPERTY_REF_CODE,
   KERNEL_ABI_VERSION,
   META,
   META_SIZE,
@@ -162,7 +163,7 @@ export function decodeExtractBuffers(
       referenceKind:
         kindByte === FUNCTION_REF_CODE
           ? 'function_ref'
-          : (EDGE_KINDS[kindByte] as ReferenceKind),
+          : kindByte === PROPERTY_REF_CODE ? 'property_ref' : (EDGE_KINDS[kindByte] as ReferenceKind),
       line: row.readUInt32LE(REF.line),
       column: row.readUInt32LE(REF.column),
     };

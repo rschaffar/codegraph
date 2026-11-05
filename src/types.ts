@@ -360,7 +360,9 @@ export interface ExtractionError {
  * becomes an edge kind: resolution maps it to a `references` edge targeting
  * function/method nodes only (see `matchFunctionRef`).
  */
-export type ReferenceKind = EdgeKind | 'function_ref';
+/** `property_ref` preserves a receiver-qualified access until typed property
+ * lookup can prove its target; it becomes `references`, never a guessed call. */
+export type ReferenceKind = EdgeKind | 'function_ref' | 'property_ref';
 
 /**
  * A reference that couldn't be resolved during extraction

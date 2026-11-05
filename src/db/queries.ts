@@ -4263,6 +4263,21 @@ export class QueryBuilder {
     }));
   }
 
+  /** Bounded admission for the property-only maintenance phase. Row identity
+   * survives repeated sites and lets persistence prune exactly the input page. */
+  getPendingCsharpPropertyReferencesAfter(after: number, limit: number): UnresolvedReference[] {
+    const rows = this.db.prepare(`SELECT * FROM unresolved_refs
+      WHERE status='pending' AND language='csharp' AND reference_kind='property_ref'
+        AND id>? ORDER BY id LIMIT ?`).all(after, limit) as UnresolvedRefRow[];
+    return rows.map(row => ({
+      fromNodeId: row.from_node_id, referenceName: row.reference_name,
+      referenceKind: row.reference_kind as UnresolvedReference['referenceKind'],
+      line: row.line, column: row.col, filePath: row.file_path,
+      language: row.language as Language, rowId: row.id,
+      candidates: row.candidates ? safeJsonParse(row.candidates, undefined) : undefined,
+    }));
+  }
+
   /**
    * Get all tracked file paths (lightweight — no full FileRecord objects)
    */
@@ -5260,23 +5275,72 @@ export class QueryBuilder {
     return changed;
   }
 
-  /**
-   * Replace resolution edges with their original unresolved references as one
-   * transaction. If ref insertion fails, the edge deletion is rolled back.
-   */
-  /**
-   * Resolution edges whose answer was read from other files
-   * (`metadata.typeFrom` — python attribute types, see
-   * `resurrectTypeDependentEdges`), with the source file context a
-   * resurrection needs. One scan; only python attribute calls carry the key.
-   */
+  /** Page examined reference IDs before dependency filtering. An empty match
+   * window still advances; unrelated edge objects are never hydrated. */
+  getCsharpPropertyTypeEdgesPage(paths: string[], after: number, limit = 2000, lookupChanged = false): {
+    cursor: number; edges: Array<Edge & { edgeId: number; sourceFilePath: string; sourceLanguage: Language }>;
+  } {
+    if (!lookupChanged && paths.length === 0) return { cursor: after, edges: [] };
+    const candidates = this.db.prepare(`SELECT id FROM edges INDEXED BY idx_edges_kind
+      WHERE kind='references' AND id>? ORDER BY id LIMIT ?`).all(after, limit) as Array<{ id: number }>;
+    if (!candidates.length) return { cursor: after, edges: [] };
+    const rows = this.db.prepare(`SELECT e.*, src.file_path AS source_file_path, src.language AS source_language
+      FROM edges e JOIN nodes src ON src.id=e.source
+      WHERE e.id IN (SELECT value FROM json_each(?)) AND src.language='csharp'
+        AND json_extract(e.metadata, '$.refKind')='property_ref'
+        AND (? OR EXISTS (SELECT 1 FROM json_each(e.metadata, '$.typeFrom') dep
+          WHERE dep.value IN (SELECT value FROM json_each(?)))) ORDER BY e.id`)
+      .all(JSON.stringify(candidates.map(row => row.id)), lookupChanged ? 1 : 0, JSON.stringify(paths)) as Array<EdgeRow & { source_file_path: string; source_language: Language }>;
+    return { cursor: candidates[candidates.length - 1]!.id,
+      edges: rows.map(row => ({ ...rowToEdge(row), edgeId: row.id, sourceFilePath: row.source_file_path, sourceLanguage: row.source_language })) };
+  }
+
+  /** Failed property candidates have no edge metadata yet. Retry only the
+   * C# type-dependent file closure, including failed type refs to new types. */
+  getCsharpPropertyRetryFiles(paths: string[], lookupChanged = false): string[] {
+    if (lookupChanged) return (this.db.prepare(`SELECT DISTINCT file_path FROM unresolved_refs
+      WHERE language='csharp' AND reference_kind='property_ref' AND status='failed' ORDER BY file_path`).all() as Array<{ file_path: string }>).map(row => row.file_path);
+    if (paths.length === 0) return [];
+    const rows = this.db.prepare(`WITH RECURSIVE
+      touched(path) AS (SELECT value FROM json_each(?)),
+      definitions(name) AS (SELECT DISTINCT n.name FROM nodes n JOIN touched f ON f.path=n.file_path
+        WHERE n.language='csharp' AND n.kind IN ('class','interface','struct')),
+      scope(path) AS (
+        SELECT path FROM touched
+        UNION SELECT DISTINCT file_path FROM unresolved_refs WHERE language='csharp'
+          AND status='failed' AND reference_kind='references' AND name_tail IN (SELECT name FROM definitions)
+        UNION SELECT src.file_path FROM scope f JOIN nodes target ON target.file_path=f.path
+          JOIN edges e ON e.target=target.id JOIN nodes src ON src.id=e.source
+          WHERE target.language='csharp' AND target.kind IN ('class','interface','struct')
+            AND src.language='csharp' AND e.kind IN ('references','extends','implements','type_of','returns')
+      ) SELECT path FROM scope ORDER BY path`).all(JSON.stringify(paths)) as Array<{ path: string }>;
+    return rows.map(row => row.path);
+  }
+
+  /** Advance over bounded failed-ID windows, including windows with no eligible
+   * property rows. Updating the selected rows is one atomic statement. */
+  reopenFailedCsharpPropertyPage(files: string[], after: number, limit = 2000): { after: number; count: number } {
+    if (files.length === 0) return { after, count: 0 };
+    const candidates = this.db.prepare(`SELECT id FROM unresolved_refs INDEXED BY idx_unresolved_status
+      WHERE status='failed' AND id>? ORDER BY id LIMIT ?`).all(after, limit) as Array<{ id: number }>;
+    if (!candidates.length) return { after, count: 0 };
+    const rows = this.db.prepare(`UPDATE unresolved_refs SET status='pending'
+      WHERE id IN (SELECT value FROM json_each(?)) AND status='failed'
+        AND language='csharp' AND reference_kind='property_ref'
+        AND file_path IN (SELECT value FROM json_each(?)) RETURNING id`)
+      .all(JSON.stringify(candidates.map(row => row.id)), JSON.stringify(files)) as Array<{ id: number }>;
+    return { after: candidates[candidates.length - 1]!.id, count: rows.length };
+  }
+
+  /** Existing Python attribute-dependency scan; C# property dependencies use
+   * the scoped, paged selector above instead of hydrating this whole set. */
   getEdgesWithTypeFrom(): Array<Edge & { edgeId: number; sourceFilePath: string; sourceLanguage: Language }> {
     const rows = this.db
       .prepare(
         `SELECT e.*, src.file_path AS source_file_path, src.language AS source_language
            FROM edges e
            JOIN nodes src ON src.id = e.source
-          WHERE e.metadata LIKE '%"typeFrom"%'`
+          WHERE src.language = 'python' AND e.metadata LIKE '%"typeFrom"%'`
       )
       .all() as Array<EdgeRow & { source_file_path: string; source_language: Language }>;
     return rows.map((row) => ({
@@ -5443,6 +5507,19 @@ export class QueryBuilder {
       for (const row of rows) pairs.add(`${row.file_path}\0${row.name}`);
     }
     return pairs;
+  }
+
+  /** C# lookup changes depend on qualified declaration identity and multiplicity,
+   * not the generic file/simple-name set. Bodies and source positions are absent. */
+  getCsharpLookupShapeByFiles(filePaths: string[]): Map<string, number> {
+    if (!filePaths.length) return new Map();
+    const rows = this.db.prepare(`SELECT file_path, kind, qualified_name, count(*) AS declarations
+      FROM nodes WHERE language='csharp' AND file_path IN (SELECT value FROM json_each(?))
+        AND kind IN ('namespace','class','interface','struct')
+      GROUP BY file_path, kind, qualified_name`).all(JSON.stringify(filePaths)) as Array<{
+        file_path: string; kind: string; qualified_name: string; declarations: number;
+      }>;
+    return new Map(rows.map(row => [JSON.stringify([row.file_path, row.kind, row.qualified_name]), row.declarations]));
   }
 
   // ===========================================================================
