@@ -153,6 +153,24 @@ means no kind is excluded, not that every member is drawn immediately.
 
 ### Source cards
 
+When a type's full source and a contained method's source card are both open,
+the method body is automatically folded in the type card. This also applies to
+existing version-one saved boards: derive it from the restored source identities,
+not a new saved flag or a migration. Preserve card geometry, membership and the
+saved/unsaved state. Keep the original method boundary lines and line numbers;
+replace only safe interior lines with a named, ranged placeholder. Ambiguous,
+overlapping or shared-line bodies stay inline rather than hiding unrelated code.
+A subtle dashed **detached source** connector joins the placeholder/declaration
+to the method card's header, distinct from indexed relationship arrows and never
+presented as a new graph edge. A containing outer type can show the same proven
+source-ownership path. Detailed indexed arrows prefer the method card even while
+it is collapsed/loading; they must not fall back into the folded class body.
+**Locate** raises/fits the existing method card. **Reattach** closes that separate
+source card and restores its body in every open containing type source. Closing
+the method card normally has the same effect. Neither action changes symbol pins.
+Folds require current verified indexed source; drift/current-file reading drops
+them. Default source readers outside the Board remain verbatim.
+
 A code card identifies its symbol, owner when present and current file:line.
 Cards are independent canvas items, not extra indexed graph nodes or code editors.
 Move, resize, collapse, close and bring to front independently; scrolling a

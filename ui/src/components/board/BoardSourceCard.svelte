@@ -13,6 +13,7 @@
     boardSourceEvidenceTitle, boardEvidenceUncertain, verifiedBoardSourceSymbol, boardSourceForIdentity,
     boardSourceTarget, boardSourceApplyEvidence, boardSourcePageProgress, boardSourceLoadReferences, boardSourceMergeExclusions, type BoardSourceTarget,
   } from '../../lib/board-source-model';
+  import type { SourceFold } from '../../lib/source-folds';
   import { boardSourceAnchorPositions, type BoardSourceAnchorPosition } from '../../lib/board-source-anchors';
   import { live } from '../../lib/live.svelte';
   import { fileHref, symbolHref, navigate } from '../../lib/navigation';
@@ -212,6 +213,7 @@
   const indexed = $derived(!!verified && !isCollapsed && !verifying && !loading && !identityError && !error &&
     !current && !!source?.lines && !source.drift && source.showing === 'indexed' &&
     verifiedIndexTick === live.indexTick && verifiedDiskTick === live.diskTick);
+  const sourceFolds = $derived(indexed ? data.sourceFolds : undefined);
   const block = $derived<CodeBlock>({ windows: source?.lines ? [{ start: source.from ?? verified?.line ?? 1, lines: source.lines }] : [], gapsAfter: [], tailGap: 0, whole: true });
   const tokens = $derived(tokensByLine(source?.lines ?? [], source?.from ?? verified?.line ?? 1, source?.highlight));
   const byId = $derived(new Map(symbols.map((item) => [item.id, item])));
@@ -248,13 +250,17 @@
     if (!canFocus(edge)) return;
     focusSourceLine(edge.line!);
   }
+  function sourceLineElement(el: HTMLElement, line: number): HTMLElement | null {
+    return el.querySelector<HTMLElement>(`[data-line="${line}"]`) ?? [...el.querySelectorAll<HTMLElement>('[data-source-fold]')]
+      .find((row) => Number(row.dataset.line) <= line && Number(row.dataset.foldEnd) >= line) ?? null;
+  }
   function focusSourceLine(line: number): void {
     localHighlight = line; pageFrom = null;
     // The same highlighted line may have been scrolled away since the last
     // activation. Do not depend on a changed highlight to reveal it again.
     void tick().then(() => {
       if (!indexed || localHighlight !== line || !sourceEl) return;
-      const row = sourceEl.querySelector<HTMLElement>(`[data-line="${line}"]`);
+      const row = sourceLineElement(sourceEl, line);
       if (row) sourceEl.scrollTop = Math.max(0, row.offsetTop - 40);
     });
   }
@@ -270,6 +276,7 @@
   $effect(() => {
     const anchors = lineAnchors; const el = sourceEl; const card = cardEl;
     const value = source; const trusted = indexed; const collapsed = isCollapsed;
+    void sourceFolds;
     if (!anchors?.length || !el || !card || !trusted || collapsed || !value?.lines?.length) { anchorPositions = []; return; }
     let active = true; let frame: number | null = null;
     function measure() {
@@ -309,14 +316,22 @@
     if (!trusted || !line || !value?.lines || !el) return;
     void tick().then(() => {
       if (source !== value || highlight !== line) return;
-      const row = el.querySelector<HTMLElement>(`[data-line="${line}"]`);
+      const row = sourceLineElement(el, line);
       if (row) el.scrollTop = Math.max(0, row.offsetTop - 40);
     });
   });
 </script>
 
+{#snippet detachedSource(fold: SourceFold)}
+  <span class="detached-placeholder"><span>{fold.label}</span><span class="dim"> · lines {fold.start}–{fold.end} · detached source</span>
+    <button type="button" aria-label={`Locate detached source ${fold.label} at lines ${fold.start}–${fold.end}`} onclick={(event) => { event.stopPropagation(); data.locateDetached?.(fold.id, event); }}>Locate ↗</button>
+    <button type="button" aria-label={`Reattach source ${fold.label} at lines ${fold.start}–${fold.end}`} onclick={(event) => { event.stopPropagation(); data.reattachSource?.(fold.id, event); }}>Reattach</button>
+  </span>
+{/snippet}
+
 <NodeResizer minWidth={380} minHeight={190} maxWidth={4096} maxHeight={4096} isVisible={selected && !data.collapsed} />
 <article class="source-card" class:chosen={selected} data-code-card={data.symbolId} bind:this={cardEl}>
+  <Handle type="target" id="source-owner" position={Position.Left} isConnectable={false} tabindex={-1} aria-hidden="true" style={`top:20px;opacity:${data.sourceOwners?.length ? 1 : 0};pointer-events:none`} />
   {#each anchorPositions as anchor (anchor.id)}
     <Handle type={anchor.direction === 'outgoing' ? 'source' : 'target'} id={anchor.id} position={anchor.direction === 'outgoing' ? Position.Right : Position.Left}
       isConnectable={false} tabindex={-1} aria-hidden="true" class="source-line-port"
@@ -337,6 +352,7 @@
   <!-- svelte-ignore a11y_no_noninteractive_tabindex (SvelteFlow owns Enter selection and arrow-key movement on this focusable move handle.) -->
   <header class="board-drag-handle" role="group" tabindex="0" aria-label={`Source card ${data.symbol.qualifiedName}`} aria-describedby={`${id}-move-help`}><KindGlyph kind={data.symbol.kind} /><strong title={data.symbol.qualifiedName}>{data.symbol.qualifiedName}</strong>
     <div class="actions nodrag nopan nokey">
+      {#if data.sourceOwners?.length}<button type="button" aria-label={`Reattach source ${data.symbol.qualifiedName}`} onclick={(event) => { event.stopPropagation(); data.reattachSource?.(data.symbolId, event); }}>Reattach</button>{/if}
       {#if data.symbol.kind === 'function' || data.symbol.kind === 'method'}
         <button type="button" aria-label={`Open sibling sources for ${data.symbol.name}`} disabled={!siblings || !siblingsAvailable || siblingsBusy}
           title={siblingsBusy ? 'Loading sibling sources…' : !siblings || !siblingsAvailable ? 'This host does not provide sibling sources.' : 'Open source cards for siblings in the indexed owner scope'}
@@ -346,13 +362,13 @@
       <button type="button" aria-label={`${data.collapsed ? 'Expand' : 'Collapse'} code card ${data.symbol.name}`} onclick={() => data.toggle(id)}>{data.collapsed ? '▾' : '▴'}</button>
       <button type="button" aria-label={`Close code card ${data.symbol.name}`} onclick={() => data.close(id)}>×</button></div>
   </header>
-  <div class="location nodrag nopan nokey">{data.symbol.kind} · {data.symbol.file}:{verified?.line ?? data.symbol.line}{#if owner} · in {owner.qualifiedName}{/if}</div>
+  <div class="location nodrag nopan nokey">{data.symbol.kind} · {data.symbol.file}:{verified?.line ?? data.symbol.line}{#if owner} · in {owner.qualifiedName}{/if}{#if data.sourceOwners?.length} · source detached from {data.sourceOwners.map((item) => item.qualifiedName).join(', ')}{/if}</div>
   {#if !data.collapsed}
     <div class="source nodrag nopan nowheel nokey" data-source-body bind:this={sourceEl}>
       {#if verifying || loading}<p role="status">Loading source…</p>{:else if identityError || error}<p role="alert">{identityError || error}</p>{/if}
       {#if source?.drift}<DriftBanner file={data.symbol.file}>indexed symbol ranges may be stale; no line-anchored graph markings are shown here. {#if !current}<button type="button" onclick={() => { current = true; pageFrom = null; }}>Read current file</button>{/if}</DriftBanner>{/if}
       {#if source?.lines}
-        <SourceBlock {block} {tokens} {refs} defLine={indexed ? verified!.line : -1} defName={verified?.name ?? data.symbol.name} highlight={indexed ? highlight : null} onfollow={followRef} />
+        <SourceBlock {block} {tokens} {refs} defLine={indexed ? verified!.line : -1} defName={verified?.name ?? data.symbol.name} highlight={indexed ? highlight : null} onfollow={followRef} folds={sourceFolds} renderFold={detachedSource} />
         <nav class="pages" aria-label="Source pages">
           <button type="button" disabled={continuation.previous === null} onclick={() => goPage(continuation.previous)}>Previous lines</button>
           <span>{#if source.lines.length}Lines {source.from ?? 1}–{(source.from ?? 1) + source.lines.length - 1}{:else}No lines in this page{/if}{current ? ' · current file' : ' · indexed symbol'}</span>
@@ -422,7 +438,9 @@
   .keyboard-help { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; cursor: grab; background: var(--paper-2); flex-shrink: 0; }
   header strong { font: 500 12px var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
-  .actions { display: flex; gap: 10px; flex-shrink: 0; }
+  .actions { display: flex; gap: 6px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; max-width: 75%; }
+  .detached-placeholder { line-height: 1.7; overflow-wrap: anywhere; }
+  .detached-placeholder button { color: var(--accent); text-decoration: underline; margin-left: 10px; font: inherit; }
   .actions button { font-size: 12px; }
   .location { font: 10px var(--mono); color: var(--ink-3); padding: 7px 12px; border-bottom: 1px solid var(--rule-soft); flex-shrink: 0; overflow-wrap: anywhere; }
   .source { position: relative; flex: 1; min-height: 0; overflow: auto; cursor: text; user-select: text; }

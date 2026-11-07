@@ -13,6 +13,7 @@
   import { live } from '../../lib/live.svelte';
   import { boardRequests } from '../../lib/board-requests.svelte';
   import { boardSourceRelations, boardSourceAnchors, boardSiblingSourceCapacity } from '../../lib/board-source-relations';
+  import { boardSourceDetachments } from '../../lib/board-source-detachments';
 
   const adapter = getGraphAdapter();
   const { fitView, screenToFlowPosition, getIntersectingNodes } = useSvelteFlow();
@@ -109,22 +110,47 @@
   const filters = $derived({ tests: includeTests, generated: includeGenerated, uncertain: includeUncertain });
   const projection = $derived(model.projectBoard(included, hidden, expanded, kind, structure, limits, { ...filters, locatedMember, memberPages, eligibleIds }));
   const sourceIdsKey = $derived(JSON.stringify(nodes.filter((node) => node.type === 'code').map((node) => node.data.symbolId).sort()));
+  const sourceIdentityKey = $derived(JSON.stringify(nodes.filter((node) => node.type === 'code').map((node) => node.data.symbol).sort((a, b) => a.id.localeCompare(b.id))));
+  function sourceReady(id: string): boolean {
+    const state = sourceStates[id];
+    return !!state?.indexed && state.indexTick === live.indexTick && state.diskTick === live.diskTick &&
+      sourceSnapshotVersion.indexTick === live.indexTick && sourceSnapshotVersion.diskTick === live.diskTick;
+  }
+  // Choose representatives from every open card before checking readiness. A
+  // collapsed/loading detached method must never fall back into its class code.
   const sourceEdges = $derived(boardSourceRelations(sourceSnapshot?.symbols ?? [], sourceSnapshot?.relations ?? [],
-    (JSON.parse(sourceIdsKey) as string[]).filter((id) => sourceStates[id]?.indexed &&
-      sourceStates[id].indexTick === live.indexTick && sourceStates[id].diskTick === live.diskTick &&
-      sourceSnapshotVersion.indexTick === live.indexTick && sourceSnapshotVersion.diskTick === live.diskTick), kind));
+    JSON.parse(sourceIdsKey) as string[], kind).filter((edge) => sourceReady(edge.source.slice(5)) && sourceReady(edge.target.slice(5))));
+  const sourceDetachments = $derived(boardSourceDetachments(sourceSnapshot?.symbols ?? [], JSON.parse(sourceIdentityKey) as BoardSymbol[])
+    .filter((item) => sourceReady(item.owner.id)));
   const canvasRelations = $derived([...projection.edges, ...sourceEdges]);
   const lanes = $derived(new Map([...edgeLaneMap(projection.edges), ...edgeLaneMap(sourceEdges, true)]));
-  const sourceAnchorGroups = $derived(new Map((JSON.parse(sourceIdsKey) as string[]).map((id) => [id, boardSourceAnchors(sourceEdges, id)])));
+  const sourceAnchorGroups = $derived(new Map((JSON.parse(sourceIdsKey) as string[]).map((id) => [id, {
+    anchors: [...boardSourceAnchors(sourceEdges, id), ...sourceDetachments.filter((item) => item.owner.id === id)
+      .map((item) => ({ id: `source-detached:${item.member.id}`, line: item.fold?.start ?? item.anchorLine, direction: 'outgoing' as const }))],
+    folds: sourceDetachments.filter((item) => item.owner.id === id).flatMap((item) => item.fold ? [{ ...item.fold, id: item.member.id }] : []),
+    owners: sourceDetachments.filter((item) => item.member.id === id).map((item) => item.owner),
+  }])));
+  const detachedEdges = $derived<Edge[]>(sourceDetachments.map((item) => ({
+    id: `source-detachment:${JSON.stringify([item.owner.id, item.member.id])}`, source: `code:${item.owner.id}`, target: `code:${item.member.id}`,
+    sourceHandle: `source-detached:${item.member.id}`, targetHandle: 'source-owner', type: 'relation', selectable: false,
+    ariaLabel: `Detached source ${item.member.qualifiedName} from ${item.owner.qualifiedName}`,
+    label: 'detached source', data: { lane: 0, detachedMember: item.member.id, presentationOnly: true },
+    style: 'stroke:var(--ink-3);stroke-width:1;stroke-dasharray:2 5;',
+    labelStyle: 'color:var(--ink-3);font:10px var(--mono);background:var(--paper);padding:3px', interactionWidth: 12,
+  })));
   $effect(() => {
     const groups = sourceAnchorGroups;
     untrack(() => {
-      nodes = nodes.map((node) => {
+      let changed = false;
+      const next = nodes.map((node) => {
         if (node.type !== 'code') return node;
-        const anchors = groups.get(node.data.symbolId) ?? [];
-        if (JSON.stringify(node.data.sourceAnchors ?? []) === JSON.stringify(anchors)) return node;
-        return { ...node, data: { ...node.data, sourceAnchors: anchors } };
+        const group = groups.get(node.data.symbolId) ?? { anchors: [], folds: [], owners: [] };
+        if (JSON.stringify([node.data.sourceAnchors ?? [], node.data.sourceFolds ?? [], node.data.sourceOwners ?? []]) === JSON.stringify([group.anchors, group.folds, group.owners])) return node;
+        changed = true;
+        return { ...node, data: { ...node.data, sourceAnchors: group.anchors, sourceFolds: group.folds, sourceOwners: group.owners,
+          locateDetached: locateDetachedSource, reattachSource } };
       });
+      if (changed) nodes = next;
     });
   });
   const related = $derived(model.sourceSelection(selectedSources, included, hidden));
@@ -134,7 +160,7 @@
   const readOnly = $derived(boardList?.readOnly !== false || !adapter.saveBoard);
   const allNodeKinds = $derived([...new Set([...nodeKinds, ...symbols.map((item) => item.kind), ...(groupPage?.items ?? []).flatMap((item) => item.byKind.map((entry) => entry.kind)), ...(libraryKind ? [libraryKind] : [])])]);
   const allEdgeKinds = $derived([...new Set([...edgeKinds, ...relations.map((item) => item.kind), ...(connectionPage?.items ?? []).flatMap((item) => item.evidence.map((edge) => edge.kind)), ...(kind ? [kind] : []), ...(connectionKind ? [connectionKind] : [])])]);
-  const edges = $derived<Edge[]>(canvasRelations.map((edge) => {
+  const edges = $derived<Edge[]>([...canvasRelations.map((edge) => {
     const lane = lanes.get(edge.id) ?? 0;
     const hot = evidence?.id === edge.id || (selectedSources.length ? edge.evidence.some((item) => related.evidenceIds.has(item.id)) : selected === edge.source || selected === edge.target);
     const uncertain = edge.evidence.some(isBoardEvidenceUncertain);
@@ -144,7 +170,7 @@
       markerEnd: { type: MarkerType.ArrowClosed, color },
       style: `stroke:${color};stroke-width:${hot ? 2.4 : 1.5};${edge.via || uncertain ? 'stroke-dasharray:6 4;' : ''}`,
       labelStyle: 'color:var(--ink-2);font:10px var(--mono);background:var(--paper);padding:4px 5px', interactionWidth: 20 };
-  }));
+  }), ...detachedEdges]);
   function merge(items: BoardSymbol[]) {
     const keep = new Set([...snapshotIds, ...included, ...expanded, ...hidden,
       ...nodes.filter((node) => node.type === 'code').map((node) => node.data.symbolId),
@@ -506,6 +532,17 @@
     }
     if (activate) { panel = null; evidence = null; void tick().then(() => boardElement?.querySelector<HTMLElement>(`[data-id="${CSS.escape(key)}"]`)?.focus({ preventScroll: true })); }
   }
+  function locateDetachedSource(id: string, event?: MouseEvent) {
+    event?.stopPropagation();
+    const key = `code:${id}`;
+    if (!nodes.some((node) => node.id === key)) return;
+    nodes = nodes.map((node) => ({ ...node, selected: node.id === key, ...(node.id === key ? { zIndex: ++zIndex } : {}) }));
+    readCard(key);
+  }
+  function reattachSource(id: string, event?: MouseEvent) {
+    event?.stopPropagation(); closeCard(`code:${id}`);
+    notice = 'Reattached source: the separate method card was closed and its code restored inside the class. Symbol membership is unchanged.';
+  }
   function reportSourceState(id: string, state: { indexed: boolean; indexTick: number; diskTick: number }) {
     const old = sourceStates[id];
     if (old?.indexed === state.indexed && old.indexTick === state.indexTick && old.diskTick === state.diskTick) return;
@@ -789,7 +826,7 @@
     <SvelteFlow bind:nodes bind:viewport {edges} {nodeTypes} {edgeTypes} minZoom={0.15} maxZoom={1.6} nodesConnectable={false} deleteKey={[]} zoomOnDoubleClick={false} panOnDrag={[2]} panActivationKey={[]} selectionOnDrag selectionKey={[]} multiSelectionKey="Shift" selectionMode={SelectionMode.Partial} autoPanOnNodeFocus={false} proOptions={{ hideAttribution: true }}
       onnodeclick={({ node, event }) => { if (!event.shiftKey) nodes = nodes.map((item) => ({ ...item, selected: item.id === node.id })); selected = node.type === 'symbol' ? node.id : model.targetState(node.data.symbolId, included, hidden).representative; if (node.type === 'code') nodes = nodes.map((item) => item.id === node.id ? { ...item, zIndex: ++zIndex } : item); }}
       onselectionstart={() => { selectingRectangle = true; }} onselectionend={finishRectangleSelection}
-      onedgeclick={({ edge }) => showEvidence(edge)} onselectionchange={() => { retainRectangleSelection(); reflectSourceSelection(nodes.filter((node) => node.selected)); }} onpaneclick={() => { selected = null; evidence = null; }}>
+      onedgeclick={({ edge }) => { if (edge.data?.detachedMember) locateDetachedSource(String(edge.data.detachedMember)); else showEvidence(edge); }} onselectionchange={() => { retainRectangleSelection(); reflectSourceSelection(nodes.filter((node) => node.selected)); }} onpaneclick={() => { selected = null; evidence = null; }}>
       <Background gap={24} size={1} patternColor="var(--rule-soft)" /><Controls showLock={false} /><MiniMap pannable zoomable nodeColor={(node) => node.type === 'code' ? 'var(--press-2)' : 'var(--accent)'} />
     </SvelteFlow>
     {#if !included.length && !codeCount}<section class="empty"><h2>Choose what you want to understand</h2><p>Add symbols from this index. Connections helps you follow only the targets you choose.</p></section>{/if}

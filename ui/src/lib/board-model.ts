@@ -56,6 +56,11 @@ export interface SourceCardData extends CodeCardData {
   symbol: BoardSymbol; follow?: (target: BoardSymbol, line?: number, event?: MouseEvent) => void; highlight?: number | null;
   filters?: BoardFilters;
   sourceAnchors?: readonly BoardSourceAnchor[];
+  /** Derived from existing open source cards, not additional saved membership. */
+  sourceFolds?: readonly import('./source-folds').SourceFold[];
+  sourceOwners?: readonly BoardSymbol[];
+  locateDetached?: (symbolId: string, event?: MouseEvent) => void;
+  reattachSource?: (symbolId: string, event?: MouseEvent) => void;
   resize?: (id: string, widthDelta: number, heightDelta: number) => void;
   siblings?: (symbolId: string, event?: MouseEvent) => Promise<void>;
   siblingsBusy?: boolean;

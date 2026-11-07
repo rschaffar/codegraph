@@ -16,6 +16,8 @@
     callee's own name whatever boundaries a grammar chose.
 -->
 <script lang="ts">
+  import type { Snippet } from 'svelte';
+  import { sourceFoldRows, type SourceFold } from '../../lib/source-folds';
   import { tokenClass, type Token } from '../../lib/highlight';
   import { assignRefs, type CodeBlock, type LineRef } from '../../lib/symbol-model';
   import { hot } from '../../lib/focus.svelte';
@@ -31,9 +33,12 @@
     /** Line from `?hl=` — tinted and scrolled to. */
     highlight: number | null;
     onfollow: (ref: LineRef, event?: MouseEvent) => void;
+    /** Optional display folds; other source readers keep their verbatim contract. */
+    folds?: readonly SourceFold[];
+    renderFold?: Snippet<[SourceFold]>;
   }
 
-  let { block, tokens, refs, defLine, defName, highlight, onfollow }: Props = $props();
+  let { block, tokens, refs, defLine, defName, highlight, onfollow, folds, renderFold }: Props = $props();
 
   interface Part {
     text: string;
@@ -44,6 +49,7 @@
 
   interface RenderedLine {
     n: number;
+    fold?: SourceFold;
     parts: Part[];
     /** 'sure' = at least one resolved edge here; 'unsure' = only guesses. */
     port: 'sure' | 'unsure' | null;
@@ -60,8 +66,9 @@
   let chunks = $derived.by<Chunk[]>(() =>
     block.windows.map((window, windowIndex) => ({
       gapBefore: windowIndex === 0 ? 0 : (block.gapsAfter[windowIndex - 1] ?? 0),
-      lines: window.lines.map((text, offset) => {
-        const n = window.start + offset;
+      lines: sourceFoldRows(window.start, window.lines.length, folds).map(({ line: n, fold }) => {
+        if (fold) return { n, fold, parts: [], port: null, targets: [] };
+        const text = window.lines[n - window.start]!;
         const lineTokens = tokens.get(n) ?? [{ cls: 'other' as const, text, col: 0 }];
         const lineRefs = refs.get(n) ?? [];
         const claimed = assignRefs(lineTokens, lineRefs);
@@ -103,7 +110,7 @@
   }
 
   function isHot(line: RenderedLine): boolean {
-    return line.n === highlight || line.targets.some((id) => hot.is(id));
+    return line.n === highlight || (line.fold && highlight !== null && highlight >= line.fold.start && highlight <= line.fold.end) || line.targets.some((id) => hot.is(id));
   }
 </script>
 
@@ -113,10 +120,10 @@
       <div class="gap">⋯ {chunk.gapBefore} lines without calls</div>
     {/if}
     {#each chunk.lines as line (line.n)}
-      <div class="ln" class:hot={isHot(line)} data-line={line.n}>
+      <div class="ln" class:hot={isHot(line)} class:folded={!!line.fold} data-line={line.n} data-fold-end={line.fold?.end} data-source-fold={line.fold?.id}>
         <span class="no">{line.n}</span>
         <span class="tx"
-          >{#each line.parts as part, i (i)}{#if part.ref && !part.ref.outside}{@const ref = part.ref}<span
+          >{#if line.fold}{#if renderFold}{@render renderFold(line.fold)}{:else}<span class="fold-label">{line.fold.label} · lines {line.fold.start}–{line.fold.end} folded</span>{/if}{:else}{#each line.parts as part, i (i)}{#if part.ref && !part.ref.outside}{@const ref = part.ref}<span
                 class="ref"
                 class:uncertain={ref.uncertain}
                 class:hot={hot.is(ref.targetId)}
@@ -135,10 +142,10 @@
               >{:else if part.ref}<span class="ref stub" title={part.ref.title}>{part.text}</span
               >{:else if part.def}<span class="t-def">{part.text}</span
               >{:else if part.cls}<span class={part.cls}>{part.text}</span
-              >{:else}{part.text}{/if}{/each}</span
+              >{:else}{part.text}{/if}{/each}{/if}</span
         >
         <span class="port">
-          {#if line.port}<i class:sure={line.port === 'sure'}></i>{/if}
+          {#if line.fold}<i class="fold-port" title="Folded source"></i>{:else if line.port}<i class:sure={line.port === 'sure'}></i>{/if}
         </span>
       </div>
     {/each}
@@ -165,6 +172,11 @@
     grid-template-columns: 44px 1fr 18px;
     align-items: stretch;
   }
+
+  .folded { background: var(--paper-2); border-block: 1px dashed var(--rule-soft); }
+  .folded .tx { white-space: normal; padding-block: 5px; }
+  .fold-label { color: var(--ink-3); }
+  .port i.fold-port { transform: rotate(45deg); border-color: var(--ink-3); background: var(--paper); }
 
   .ln:hover {
     background: var(--paper-2);
