@@ -320,6 +320,63 @@ describe('Board pointer interactions and placement', () => {
 });
 
 describe('Board relationship rendering', () => {
+  function legacyDetachedBoard(withTarget = false) {
+    const method = { ...children[0], line: 2, endLine: 5 };
+    facts = [a, b, method];
+    const recipe = documentFor(a);
+    recipe.symbols.push({ ...documentFor(method).symbols[0], key: 'method', included: false });
+    recipe.cards = [
+      { key: 'owner-card', symbolKey: 's0', position: { x: 120, y: 150 }, width: 530, height: 310, collapsed: false, zIndex: 12 },
+      { key: 'method-card', symbolKey: 'method', position: { x: 800, y: 170 }, width: 530, height: 310, collapsed: false, zIndex: 13 },
+    ];
+    if (withTarget) {
+      recipe.symbols.push({ ...documentFor(b).symbols[0], key: 'target', included: false });
+      recipe.cards.push({ key: 'target-card', symbolKey: 'target', position: { x: 1400, y: 170 }, width: 530, height: 310, collapsed: false, zIndex: 14 });
+    }
+    records.get('a')!.document = clone(recipe);
+    calls.source.mockImplementation(async (request) => ({ file: request.file, language: 'typescript', drift: false, showing: 'indexed',
+      contentHash: 'matching', indexedAt: 1, generated: false, totalLines: 100, from: request.from, to: request.to,
+      lines: Array.from({ length: request.to! - request.from! + 1 }, (_, i) => ({ 1: 'class Alpha {', 2: '  member0() {', 3: '    METHOD_BODY_MARKER();', 4: '    return 1;', 5: '  }', 100: '}' }[request.from! + i] ?? `// line ${request.from! + i}`)) }));
+    calls.board.mockImplementation(async (ids) => ({ ...snapshot(ids), relations: [{ ...edge, source: method.id, kind: 'calls', line: 3 }] }));
+    return recipe;
+  }
+
+  it('automatically detaches existing saved class/method source cards without changing their recipe or placement, and reattaches by closing the method card', async () => {
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(530);
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(310);
+    const original = legacyDetachedBoard();
+    await render(); await open();
+    const owner = host.querySelector<HTMLElement>('[data-code-card="a"]')!;
+    const method = host.querySelector<HTMLElement>('[data-code-card="m0"]')!;
+    await vi.waitFor(() => expect(owner.querySelector('[data-source-fold="m0"]')).not.toBeNull());
+    expect(owner.textContent).not.toContain('METHOD_BODY_MARKER');
+    expect(method.textContent).toContain('METHOD_BODY_MARKER');
+    await vi.waitFor(() => expect(host.querySelectorAll('.svelte-flow__edge[data-id^="source-detachment:"]')).toHaveLength(1));
+    expect(host.querySelectorAll('.svelte-flow__node-symbol')).toHaveLength(1);
+    expect(host.querySelector('.savebar')?.textContent).not.toContain('Unsaved changes');
+    await click('Save');
+    const saved = calls.saveBoard.mock.calls.at(-1)![0].document;
+    expect(identityGeometry(saved)).toEqual(identityGeometry(original));
+    expect(JSON.stringify(saved)).not.toContain('sourceFolds');
+    const fold = owner.querySelector('[data-source-fold="m0"]')!;
+    [...fold.querySelectorAll('button')].find((button) => button.textContent === 'Reattach')!.click(); await settle();
+    await vi.waitFor(() => expect(owner.textContent).toContain('METHOD_BODY_MARKER'));
+    expect(host.querySelector('[data-code-card="m0"]')).toBeNull();
+    expect(owner.querySelector('[data-source-fold]')).toBeNull();
+    expect(host.querySelectorAll('.svelte-flow__edge[data-id^="source-detachment:"]')).toHaveLength(0);
+    expect(host.querySelectorAll('.svelte-flow__node-symbol')).toHaveLength(1);
+  });
+
+  it('keeps the ownership link and class fold when a detached method is collapsed, without falling its typed connections back into class code', async () => {
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(530);
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(310);
+    legacyDetachedBoard(true); await render(); await open();
+    await vi.waitFor(() => expect(host.querySelectorAll('.svelte-flow__edge[data-id^="source-relation:"]')).toHaveLength(1));
+    await click('Collapse code card member0');
+    await vi.waitFor(() => expect(host.querySelectorAll('.svelte-flow__edge[data-id^="source-relation:"]')).toHaveLength(0));
+    expect(host.querySelector('[data-code-card="a"] [data-source-fold="m0"]')).not.toBeNull();
+    expect(host.querySelectorAll('.svelte-flow__edge[data-id^="source-detachment:"]')).toHaveLength(1);
+  });
   beforeEach(() => {
     const rect = (x: number, y: number, width: number, height: number) => ({ x, y, width, height, left: x, top: y, right: x + width, bottom: y + height, toJSON() {} });
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {

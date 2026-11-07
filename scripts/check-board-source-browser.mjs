@@ -23,6 +23,7 @@ const contents = new Map([
   ['group.ts', `${Array.from({ length: 36 }, (_, i) => `function sourceDep${i}() { return ${i}; }`).join('\n')}\nexport class SourceGroup {\n first() { return this.second() + ${Array.from({ length: 36 }, (_, i) => `sourceDep${i}()`).join(' + ')}; }\n second() { return 2; }\n third() { return this.second(); }\n}\nexport class UnrelatedGroup { unrelated() { return 99; } }\n`],
   ['free.ts', 'export function freeA() { return freeB(); }\nexport function freeB() { return 1; }\nexport function freeC() { return freeB(); }\nclass Unrelated { hiddenMethod() { return 2; } }\n'],
   ['free.ts.extra.ts', 'export function wrongFile() { return 0; }\n'],
+  ['detach.ts', 'export class LegacySource {\n  first() {\n    const only_in_detached_method = 41;\n    return this.second() + only_in_detached_method;\n  }\n  second() {\n    return 1;\n  }\n}\n'],
   ['scroll-caller.ts', `import { ScrollTarget } from './scroll-target';\nexport function scrollCaller() {\n${Array.from({ length: 60 }, (_, i) => `  const value${i} = ${i};`).join('\n')}\n  return ScrollTarget.run();\n}\n`],
   ['scroll-target.ts', `export class ScrollTarget {\n${Array.from({ length: 60 }, (_, i) => `  value${i} = ${i};`).join('\n')}\n  static run() { return 1; }\n}\n`],
 ]);
@@ -73,7 +74,8 @@ try {
   await search('SourceGroup'); click('Add SourceGroup'); await delay(200); click('Close symbol library'); click('Open SourceGroup source');
   await waitFor('[...document.querySelectorAll(".source-card .ref")].some(link=>link.textContent==="sourceDep35")', 'automatic whole-class reference pages');
   pass('whole-class clickable references load across target pages without manual evidence clicks');
-  await search('first'); click('Source');
+  await search('first');
+  evaluate('const row=[...document.querySelectorAll(".library .result")].find(row=>row.querySelector("small")?.textContent.includes("group.ts"));[...row.querySelectorAll("button")].find(button=>button.textContent==="Source").click();return true;');
   await waitFor('document.querySelectorAll("[data-code-card]").length===2', 'individual method source');
   const before = geometry(); click('Open sibling sources for first');
   await waitFor('document.querySelectorAll("[data-code-card]").length===4', 'one-click sibling sources');
@@ -85,7 +87,7 @@ try {
     if (edge.id.startsWith('source-relation:')) { assert.match(edge.label, /^Edge from code:/); assert.ok(edge.label.includes(' to code:')); assert.ok(!edge.id.includes('"imports"')); }
     else assert.ok(!edge.label.includes('code:'), 'symbol edges must not connect source cards');
   }
-  const first = (await api('/api/board/search?q=first&kind=method')).items[0];
+  const first = (await api('/api/board/search?q=first&kind=method')).items.find(item=>item.file==='group.ts');
   const siblings = await api(`/api/board/sibling-sources?id=${encodeURIComponent(first.id)}`);
   assert.deepEqual(siblings.items.map(item => item.name), ['second', 'third']);
   pass('same-class sibling source cards preserve symbols, existing geometry and viewport; arrow layers stay separate');
@@ -149,6 +151,43 @@ try {
   evaluate(`document.querySelector('[data-code-card="${targetType.id}"] details.size summary').click();return true;`);click('Wider');
   await delay(200);const resized=lineState();assert.ok(Math.abs(resized.start-resized.dot)<2);assert.ok(Math.abs(resized.end-resized.row)<2);
   pass('actual call dots connect to contained target declaration lines, track each scroll at canvas zoom, label hidden lines and survive resizing without scroll-driven requests');
+
+  const legacyClass = (await api('/api/board/search?q=LegacySource&kind=class')).items[0];
+  const legacyMethod = (await api('/api/board/search?q=first&kind=method')).items.find(item=>item.file==='detach.ts');
+  assert.ok(legacyClass && legacyMethod);
+  const identity = node => ({ id:node.id, qualifiedName:node.qualifiedName, kind:node.kind, file:node.file, ...(node.signature?{signature:node.signature}:{}) });
+  // Deliberately create only the pre-feature version-one recipe: no fold flags,
+  // detached metadata or new symbol membership is needed for existing boards.
+  const oldDocument = { version:1, symbols:[
+    {key:'owner',identity:identity(legacyClass),position:{x:0,y:0},included:true,hidden:false,expanded:false},
+    {key:'member',identity:identity(legacyMethod),position:{x:500,y:0},included:true,hidden:false,expanded:false},
+  ], cards:[
+    {key:'class-code',symbolKey:'owner',position:{x:50,y:100},width:530,height:310,collapsed:false,zIndex:12},
+    {key:'method-code',symbolKey:'member',position:{x:750,y:100},width:530,height:310,collapsed:false,zIndex:13},
+  ], viewport:{x:0,y:0,zoom:1}, filters:{kind:'',showStructure:false,includeTests:false,includeGenerated:false,includeUncertain:false} };
+  const legacyResponse = await fetch(`${base}/api/boards`, {method:'POST',headers:{'content-type':'application/json','X-CodeGraph-UI':'1'},body:JSON.stringify({name:'Legacy detachment',document:oldDocument})});
+  assert.ok(legacyResponse.ok); const legacySaved = await legacyResponse.json();
+  click('New'); click('Saved boards');
+  await waitFor('[...document.querySelectorAll("button")].some(button=>(button.getAttribute("aria-label")??button.textContent.trim())==="Open Legacy detachment")', 'legacy saved board');
+  click('Open Legacy detachment');
+  await waitFor(`document.querySelector('[data-code-card="${legacyClass.id}"] [data-source-fold="${legacyMethod.id}"]')`, 'automatic detachment on old saved board');
+  assert.equal(evaluate(`return document.querySelector('[data-code-card="${legacyClass.id}"] [data-source-body]').textContent.includes('only_in_detached_method');`), false);
+  assert.equal(evaluate(`return document.querySelector('[data-code-card="${legacyMethod.id}"] [data-source-body]').textContent.includes('only_in_detached_method');`), true);
+  await waitFor('document.querySelectorAll(".svelte-flow__edge[data-id^=\\"source-detachment:\\"]").length===1', 'presentation ownership link');
+  assert.equal(geometry().symbols,2);
+  const afterLegacy = await api(`/api/boards/${legacySaved.id}`);
+  assert.deepEqual(afterLegacy.board,oldDocument);
+  assert.equal(evaluate('return document.querySelector(".savebar").textContent.includes("Unsaved changes");'),false);
+  const placement = geometry();
+  assert.ok(placement.positions.find(([id])=>id===`code:${legacyClass.id}`)[1].includes('50px, 100px'));
+  assert.ok(placement.positions.find(([id])=>id===`code:${legacyMethod.id}`)[1].includes('750px, 100px'));
+  command('screenshot', path.join(work, 'detached.png'));
+  const reattach = evaluate(`const fold=document.querySelector('[data-code-card="${legacyClass.id}"] [data-source-fold="${legacyMethod.id}"]');const button=[...fold.querySelectorAll('button')].find(button=>button.textContent==='Reattach');const rect=button.getBoundingClientRect();return{x:rect.left+rect.width/2,y:rect.top+rect.height/2};`);
+  command('mouse','move',String(Math.round(reattach.x)),String(Math.round(reattach.y)));command('mouse','down');command('mouse','up');
+  await waitFor(`!document.querySelector('[data-code-card="${legacyMethod.id}"]')&&document.querySelector('[data-code-card="${legacyClass.id}"] [data-source-body]').textContent.includes('only_in_detached_method')`, 'reattach closes source card and restores original class code');
+  assert.equal(evaluate('return document.querySelectorAll(".svelte-flow__edge[data-id^=\\"source-detachment:\\"]").length;'),0);
+  assert.equal(geometry().symbols,2);
+  pass('pre-feature saved boards auto-detach existing class/method source cards without migration, writes, new pins or moved geometry; native Reattach closes the method card and restores its class source');
   assert.equal(command('errors'), '');
   for (const [file, text] of contents) assert.equal(fs.readFileSync(path.join(project, file), 'utf8'), text);
   pass('no browser errors or source-file changes');
