@@ -153,6 +153,12 @@ means no kind is excluded, not that every member is drawn immediately.
 
 ### Source cards
 
+Class/type source cards offer **Detach** beside each eligible indexed method
+start line. It opens/reuses that method's source card, applies the normal card
+limits and automatic body folding, and leaves existing cards, viewport and pins
+unchanged. Only fresh, proven members in the current eligible source scope get
+action controls; stale/current-file reading and ancestor-only cached facts do not.
+
 When a type's full source and a contained method's source card are both open,
 the method body is automatically folded in the type card. This also applies to
 existing version-one saved boards: derive it from the restored source identities,

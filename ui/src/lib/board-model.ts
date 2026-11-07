@@ -59,6 +59,8 @@ export interface SourceCardData extends CodeCardData {
   /** Derived from existing open source cards, not additional saved membership. */
   sourceFolds?: readonly import('./source-folds').SourceFold[];
   sourceOwners?: readonly BoardSymbol[];
+  detachableSources?: readonly BoardSymbol[];
+  detachSource?: (symbol: BoardSymbol, event?: MouseEvent) => void;
   locateDetached?: (symbolId: string, event?: MouseEvent) => void;
   reattachSource?: (symbolId: string, event?: MouseEvent) => void;
   resize?: (id: string, widthDelta: number, heightDelta: number) => void;

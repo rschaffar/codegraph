@@ -36,9 +36,11 @@
     /** Optional display folds; other source readers keep their verbatim contract. */
     folds?: readonly SourceFold[];
     renderFold?: Snippet<[SourceFold]>;
+    /** Optional controls on indexed lines; normal readers have no action column. */
+    renderLineActions?: Snippet<[number]>;
   }
 
-  let { block, tokens, refs, defLine, defName, highlight, onfollow, folds, renderFold }: Props = $props();
+  let { block, tokens, refs, defLine, defName, highlight, onfollow, folds, renderFold, renderLineActions }: Props = $props();
 
   interface Part {
     text: string;
@@ -120,7 +122,7 @@
       <div class="gap">⋯ {chunk.gapBefore} lines without calls</div>
     {/if}
     {#each chunk.lines as line (line.n)}
-      <div class="ln" class:hot={isHot(line)} class:folded={!!line.fold} data-line={line.n} data-fold-end={line.fold?.end} data-source-fold={line.fold?.id}>
+      <div class="ln" class:hot={isHot(line)} class:folded={!!line.fold} class:with-line-actions={!!renderLineActions} data-line={line.n} data-fold-end={line.fold?.end} data-source-fold={line.fold?.id}>
         <span class="no">{line.n}</span>
         <span class="tx"
           >{#if line.fold}{#if renderFold}{@render renderFold(line.fold)}{:else}<span class="fold-label">{line.fold.label} · lines {line.fold.start}–{line.fold.end} folded</span>{/if}{:else}{#each line.parts as part, i (i)}{#if part.ref && !part.ref.outside}{@const ref = part.ref}<span
@@ -144,6 +146,7 @@
               >{:else if part.cls}<span class={part.cls}>{part.text}</span
               >{:else}{part.text}{/if}{/each}{/if}</span
         >
+        {#if renderLineActions}<span class="line-actions">{@render renderLineActions(line.n)}</span>{/if}
         <span class="port">
           {#if line.fold}<i class="fold-port" title="Folded source"></i>{:else if line.port}<i class:sure={line.port === 'sure'}></i>{/if}
         </span>
@@ -173,6 +176,8 @@
     align-items: stretch;
   }
 
+  .ln.with-line-actions { grid-template-columns: 44px minmax(0, 1fr) auto 18px; }
+  .line-actions { display: flex; align-items: center; gap: 4px; user-select: none; }
   .folded { background: var(--paper-2); border-block: 1px dashed var(--rule-soft); }
   .folded .tx { white-space: normal; padding-block: 5px; }
   .fold-label { color: var(--ink-3); }

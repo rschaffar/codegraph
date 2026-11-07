@@ -188,6 +188,16 @@ try {
   assert.equal(evaluate('return document.querySelectorAll(".svelte-flow__edge[data-id^=\\"source-detachment:\\"]").length;'),0);
   assert.equal(geometry().symbols,2);
   pass('pre-feature saved boards auto-detach existing class/method source cards without migration, writes, new pins or moved geometry; native Reattach closes the method card and restores its class source');
+  await waitFor(`document.querySelector('[data-code-card="${legacyClass.id}"] [data-detach-source="${legacyMethod.id}"]')`, 'inline Detach action after reattachment');
+  const beforeDirect = geometry();
+  click(`Detach ${legacyMethod.qualifiedName} source at line ${legacyMethod.line}`);
+  await waitFor(`document.querySelector('[data-code-card="${legacyMethod.id}"]')&&document.querySelector('[data-code-card="${legacyClass.id}"] [data-source-fold="${legacyMethod.id}"]')`, 'native inline Detach opens and folds method source');
+  const afterDirect = geometry();
+  assert.equal(afterDirect.symbols,beforeDirect.symbols);assert.equal(afterDirect.viewport,beforeDirect.viewport);
+  assert.equal(afterDirect.positions.find(([id])=>id===`code:${legacyClass.id}`)[1],beforeDirect.positions.find(([id])=>id===`code:${legacyClass.id}`)[1]);
+  assert.equal(evaluate(`return document.querySelector('[data-code-card="${legacyClass.id}"] [data-detach-source="${legacyMethod.id}"]')===null;`),true);
+  command('screenshot',path.join(work,'direct-detach.png'));
+  pass('native inline Detach opens the method source and folds its class body without new pins, moved existing cards or changed viewport');
   assert.equal(command('errors'), '');
   for (const [file, text] of contents) assert.equal(fs.readFileSync(path.join(project, file), 'utf8'), text);
   pass('no browser errors or source-file changes');

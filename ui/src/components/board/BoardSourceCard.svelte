@@ -214,6 +214,15 @@
     !current && !!source?.lines && !source.drift && source.showing === 'indexed' &&
     verifiedIndexTick === live.indexTick && verifiedDiskTick === live.diskTick);
   const sourceFolds = $derived(indexed ? data.sourceFolds : undefined);
+  const noDetachableSources: readonly BoardSymbol[] = [];
+  const detachableSources = $derived(indexed ? data.detachableSources ?? noDetachableSources : noDetachableSources);
+  const detachableByLine = $derived.by(() => {
+    const rows = new Map<number, BoardSymbol[]>();
+    for (const member of detachableSources) {
+      const items = rows.get(member.line) ?? []; items.push(member); rows.set(member.line, items);
+    }
+    return rows;
+  });
   const block = $derived<CodeBlock>({ windows: source?.lines ? [{ start: source.from ?? verified?.line ?? 1, lines: source.lines }] : [], gapsAfter: [], tailGap: 0, whole: true });
   const tokens = $derived(tokensByLine(source?.lines ?? [], source?.from ?? verified?.line ?? 1, source?.highlight));
   const byId = $derived(new Map(symbols.map((item) => [item.id, item])));
@@ -322,6 +331,17 @@
   });
 </script>
 
+{#snippet sourceLineActions(line: number)}
+  {#each detachableByLine.get(line) ?? noDetachableSources as member (member.id)}
+    <button type="button" class="inline-detach nodrag nopan nokey" disabled={!data.detachSource}
+      data-detach-source={member.id} aria-label={`Detach ${member.qualifiedName} source at line ${member.line}`}
+      title={`Open a separate source card for ${member.qualifiedName}${member.signature ? ` · ${member.signature}` : ''}; fold its body here without adding symbol pins.`}
+      onclick={(event) => { event.stopPropagation(); if (indexed) data.detachSource?.(member, event); }}>
+      Detach{(detachableByLine.get(line)?.length ?? 0) > 1 ? ` ${member.name}` : ''}
+    </button>
+  {/each}
+{/snippet}
+
 {#snippet detachedSource(fold: SourceFold)}
   <span class="detached-placeholder"><span>{fold.label}</span><span class="dim"> · lines {fold.start}–{fold.end} · detached source</span>
     <button type="button" aria-label={`Locate detached source ${fold.label} at lines ${fold.start}–${fold.end}`} onclick={(event) => { event.stopPropagation(); data.locateDetached?.(fold.id, event); }}>Locate ↗</button>
@@ -368,7 +388,7 @@
       {#if verifying || loading}<p role="status">Loading source…</p>{:else if identityError || error}<p role="alert">{identityError || error}</p>{/if}
       {#if source?.drift}<DriftBanner file={data.symbol.file}>indexed symbol ranges may be stale; no line-anchored graph markings are shown here. {#if !current}<button type="button" onclick={() => { current = true; pageFrom = null; }}>Read current file</button>{/if}</DriftBanner>{/if}
       {#if source?.lines}
-        <SourceBlock {block} {tokens} {refs} defLine={indexed ? verified!.line : -1} defName={verified?.name ?? data.symbol.name} highlight={indexed ? highlight : null} onfollow={followRef} folds={sourceFolds} renderFold={detachedSource} />
+        <SourceBlock {block} {tokens} {refs} defLine={indexed ? verified!.line : -1} defName={verified?.name ?? data.symbol.name} highlight={indexed ? highlight : null} onfollow={followRef} folds={sourceFolds} renderFold={detachedSource} renderLineActions={sourceLineActions} />
         <nav class="pages" aria-label="Source pages">
           <button type="button" disabled={continuation.previous === null} onclick={() => goPage(continuation.previous)}>Previous lines</button>
           <span>{#if source.lines.length}Lines {source.from ?? 1}–{(source.from ?? 1) + source.lines.length - 1}{:else}No lines in this page{/if}{current ? ' · current file' : ' · indexed symbol'}</span>
@@ -439,6 +459,7 @@
   header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; cursor: grab; background: var(--paper-2); flex-shrink: 0; }
   header strong { font: 500 12px var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
   .actions { display: flex; gap: 6px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; max-width: 75%; }
+  .inline-detach { font: 10px var(--mono); line-height: 1.4; white-space: nowrap; color: var(--accent); padding: 1px 4px; border: 1px solid var(--rule); margin-block: 1px; }
   .detached-placeholder { line-height: 1.7; overflow-wrap: anywhere; }
   .detached-placeholder button { color: var(--accent); text-decoration: underline; margin-left: 10px; font: inherit; }
   .actions button { font-size: 12px; }

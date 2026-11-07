@@ -23,22 +23,8 @@ const contains = (parent: BoardSymbol, child: BoardSymbol): boolean =>
 const sourceOrder = (a: BoardSymbol, b: BoardSymbol): number =>
   a.file.localeCompare(b.file) || a.line - b.line || (a.startColumn ?? 0) - (b.startColumn ?? 0) || a.id.localeCompare(b.id);
 
-/**
- * Derive presentation only, including for saved boards that already have both
- * cards. `symbols` must be current indexed facts, not saved/discovery snapshots.
- * Callers must additionally gate rendering on verified, non-drifted indexed bytes.
- * Removing a method from openCards restores all class bytes on the next call;
- * no detachment state, recipe migration, pinning or geometry changes are needed.
- *
- * With no end columns or source text, neither method boundary line is safe to
- * replace (it can share another declaration or a class brace). Fold only the
- * strict interior. Conflicting unrelated declarations or overlapping folds on
- * one owner fail closed to anchor-only entries. Such entries preserve every
- * byte: consumers may add an ownership link at anchorLine, NEVER replace it.
- */
-export function boardSourceDetachments(
-  symbols: readonly BoardSymbol[], openCards: readonly BoardSymbol[],
-): BoardSourceDetachment[] {
+/** Shared indexed identity and explicit ownership traversal; no fold-safety scan. */
+function sourceContainment(symbols: readonly BoardSymbol[], openCards: readonly BoardSymbol[]) {
   const facts = new Map<string, BoardSymbol[]>();
   for (const item of symbols) {
     const group = facts.get(item.id) ?? [];
@@ -68,35 +54,76 @@ export function boardSourceDetachments(
     return path;
   }
 
-  const out: BoardSourceDetachment[] = [];
-  for (const member of [...open.values()].filter(callable).sort(sourceOrder)) {
-    const path = ancestry(member);
-    // A function/method nested in a callable or value is not a class member.
-    if (!path?.length || !TYPES.has(path[0]!.kind)) continue;
-    const ancestorIds = new Set(path.map((item) => item.id));
-    let child = member;
-    for (const owner of path) {
-      // Ranges only validate an explicit ownerId hop; they never discover one.
-      if (!contains(owner, child)) break;
-      child = owner;
-      if (!TYPES.has(owner.kind) || !open.has(owner.id)) continue;
-      const start = member.line + 1;
-      const end = member.endLine! - 1;
-      let safe = start <= end;
-      if (safe) for (const other of symbols) {
-        // A file node is metadata for these same bytes, not another declaration.
-        if (other.kind === 'file' || other.file !== member.file || other.id === member.id || ancestorIds.has(other.id)) continue;
-        if (!safeLine(other.line)) continue;
-        const otherEnd = safeLine(other.endLine) && other.endLine >= other.line ? other.endLine : other.line;
-        if (other.line > end || otherEnd < start) continue;
-        // Proven local declarations are part of this method's bytes. An
-        // unrelated/unknown-owner declaration must never disappear with it.
-        if (ancestry(other)?.some((item) => item.id === member.id)) continue;
-        safe = false; break;
+  function targets(openMembersOnly: boolean): { owner: BoardSymbol; member: BoardSymbol }[] {
+    const out: { owner: BoardSymbol; member: BoardSymbol }[] = [];
+    for (const member of (openMembersOnly ? open : byId).values()) {
+      if (!callable(member)) continue;
+      const path = ancestry(member);
+      // A function/method nested in a callable or value is not a class member.
+      if (!path?.length || !TYPES.has(path[0]!.kind)) continue;
+      let child = member;
+      for (const owner of path) {
+        // Ranges only validate an explicit ownerId hop; they never discover one.
+        if (!contains(owner, child)) break;
+        child = owner;
+        if (TYPES.has(owner.kind) && open.has(owner.id)) out.push({ owner: open.get(owner.id)!, member });
       }
-      out.push({ owner: open.get(owner.id)!, member, anchorLine: member.line,
-        ...(safe ? { fold: { id: `source-detachment:${JSON.stringify([owner.id, member.id])}`, start, end, label: member.name } } : {}) });
     }
+    return out.sort((a, b) => sourceOrder(a.owner, b.owner) || sourceOrder(a.member, b.member));
+  }
+  return { ancestry, targets };
+}
+
+/**
+ * Discover indexed callable members of every verified open type source card,
+ * including members whose own source cards are not open. `symbols` must be
+ * current indexed facts, not saved/discovery snapshots. No names or ranges are
+ * inferred and no source bytes, pins or graph state are changed. Short methods
+ * and conflicting interiors remain useful candidates for a separate source card.
+ * Callers filter already-open members and gate actions on verified indexed bytes.
+ */
+export function boardSourceDetachTargets(
+  symbols: readonly BoardSymbol[], openCards: readonly BoardSymbol[],
+): { owner: BoardSymbol; member: BoardSymbol }[] {
+  return sourceContainment(symbols, openCards).targets(false);
+}
+
+/**
+ * Derive presentation only, including for saved boards that already have both
+ * cards. `symbols` must be current indexed facts, not saved/discovery snapshots.
+ * Callers must additionally gate rendering on verified, non-drifted indexed bytes.
+ * Removing a method from openCards restores all class bytes on the next call;
+ * no detachment state, recipe migration, pinning or geometry changes are needed.
+ *
+ * With no end columns or source text, neither method boundary line is safe to
+ * replace (it can share another declaration or a class brace). Fold only the
+ * strict interior. Conflicting unrelated declarations or overlapping folds on
+ * one owner fail closed to anchor-only entries. Such entries preserve every
+ * byte: consumers may add an ownership link at anchorLine, NEVER replace it.
+ */
+export function boardSourceDetachments(
+  symbols: readonly BoardSymbol[], openCards: readonly BoardSymbol[],
+): BoardSourceDetachment[] {
+  const { ancestry, targets } = sourceContainment(symbols, openCards);
+  const out: BoardSourceDetachment[] = [];
+  for (const { owner, member } of targets(true)) {
+    const ancestorIds = new Set(ancestry(member)!.map((item) => item.id));
+    const start = member.line + 1;
+    const end = member.endLine! - 1;
+    let safe = start <= end;
+    if (safe) for (const other of symbols) {
+      // A file node is metadata for these same bytes, not another declaration.
+      if (other.kind === 'file' || other.file !== member.file || other.id === member.id || ancestorIds.has(other.id)) continue;
+      if (!safeLine(other.line)) continue;
+      const otherEnd = safeLine(other.endLine) && other.endLine >= other.line ? other.endLine : other.line;
+      if (other.line > end || otherEnd < start) continue;
+      // Proven local declarations are part of this method's bytes. An
+      // unrelated/unknown-owner declaration must never disappear with it.
+      if (ancestry(other)?.some((item) => item.id === member.id)) continue;
+      safe = false; break;
+    }
+    out.push({ owner, member, anchorLine: member.line,
+      ...(safe ? { fold: { id: `source-detachment:${JSON.stringify([owner.id, member.id])}`, start, end, label: member.name } } : {}) });
   }
 
   // Even genuinely nested open methods cannot have overlapping replacement
