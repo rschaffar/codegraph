@@ -13,7 +13,7 @@
   import { live } from '../../lib/live.svelte';
   import { boardRequests } from '../../lib/board-requests.svelte';
   import { boardSourceRelations, boardSourceAnchors, boardSiblingSourceCapacity } from '../../lib/board-source-relations';
-  import { boardSourceDetachments } from '../../lib/board-source-detachments';
+  import { boardSourceDetachments, boardSourceDetachTargets } from '../../lib/board-source-detachments';
 
   const adapter = getGraphAdapter();
   const { fitView, screenToFlowPosition, getIntersectingNodes } = useSvelteFlow();
@@ -122,6 +122,12 @@
     JSON.parse(sourceIdsKey) as string[], kind).filter((edge) => sourceReady(edge.source.slice(5)) && sourceReady(edge.target.slice(5))));
   const sourceDetachments = $derived(boardSourceDetachments(sourceSnapshot?.symbols ?? [], JSON.parse(sourceIdentityKey) as BoardSymbol[])
     .filter((item) => sourceReady(item.owner.id)));
+  const detachTargets = $derived.by(() => {
+    const open = new Set(JSON.parse(sourceIdsKey) as string[]);
+    const eligible = new Set(sourceSnapshot?.scopeIds ?? sourceSnapshot?.symbols.map((item) => item.id) ?? []);
+    return boardSourceDetachTargets(sourceSnapshot?.symbols ?? [], JSON.parse(sourceIdentityKey) as BoardSymbol[])
+      .filter((item) => sourceReady(item.owner.id) && eligible.has(item.member.id) && !open.has(item.member.id));
+  });
   const canvasRelations = $derived([...projection.edges, ...sourceEdges]);
   const lanes = $derived(new Map([...edgeLaneMap(projection.edges), ...edgeLaneMap(sourceEdges, true)]));
   const sourceAnchorGroups = $derived(new Map((JSON.parse(sourceIdsKey) as string[]).map((id) => [id, {
@@ -129,6 +135,7 @@
       .map((item) => ({ id: `source-detached:${item.member.id}`, line: item.fold?.start ?? item.anchorLine, direction: 'outgoing' as const }))],
     folds: sourceDetachments.filter((item) => item.owner.id === id).flatMap((item) => item.fold ? [{ ...item.fold, id: item.member.id }] : []),
     owners: sourceDetachments.filter((item) => item.member.id === id).map((item) => item.owner),
+    detachable: detachTargets.filter((item) => item.owner.id === id).map((item) => item.member),
   }])));
   const detachedEdges = $derived<Edge[]>(sourceDetachments.map((item) => ({
     id: `source-detachment:${JSON.stringify([item.owner.id, item.member.id])}`, source: `code:${item.owner.id}`, target: `code:${item.member.id}`,
@@ -144,11 +151,11 @@
       let changed = false;
       const next = nodes.map((node) => {
         if (node.type !== 'code') return node;
-        const group = groups.get(node.data.symbolId) ?? { anchors: [], folds: [], owners: [] };
-        if (JSON.stringify([node.data.sourceAnchors ?? [], node.data.sourceFolds ?? [], node.data.sourceOwners ?? []]) === JSON.stringify([group.anchors, group.folds, group.owners])) return node;
+        const group = groups.get(node.data.symbolId) ?? { anchors: [], folds: [], owners: [], detachable: [] };
+        if (JSON.stringify([node.data.sourceAnchors ?? [], node.data.sourceFolds ?? [], node.data.sourceOwners ?? [], node.data.detachableSources ?? []]) === JSON.stringify([group.anchors, group.folds, group.owners, group.detachable])) return node;
         changed = true;
         return { ...node, data: { ...node.data, sourceAnchors: group.anchors, sourceFolds: group.folds, sourceOwners: group.owners,
-          locateDetached: locateDetachedSource, reattachSource } };
+          detachableSources: group.detachable, detachSource, locateDetached: locateDetachedSource, reattachSource } };
       });
       if (changed) nodes = next;
     });
@@ -531,6 +538,11 @@
         data: { symbolId: id, symbol: item, collapsed: false, highlight, filters, follow: followSource, resize: resizeCard, close: closeCard, toggle: toggleCard, read: readCard, siblings: openSiblingSources, siblingsBusy, siblingsAvailable: !!adapter.boardSiblingSources, sourceState: reportSourceState } }];
     }
     if (activate) { panel = null; evidence = null; void tick().then(() => boardElement?.querySelector<HTMLElement>(`[data-id="${CSS.escape(key)}"]`)?.focus({ preventScroll: true })); }
+  }
+  function detachSource(target: BoardSymbol, event?: MouseEvent) {
+    // A class source-only card can expose members absent from the symbol cache.
+    // Reuse normal source-card opening, including its capacity and identity guards.
+    followSource(target, undefined, event);
   }
   function locateDetachedSource(id: string, event?: MouseEvent) {
     event?.stopPropagation();

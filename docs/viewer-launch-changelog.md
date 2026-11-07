@@ -23,6 +23,8 @@ These describe `codegraph ui` and its screens. They were taken out of `## [Unrel
 
 - Opening a class and a separate method source automatically folds the duplicated method body and links its location to the method card, including on existing saved boards; Reattach closes the separate card and restores the inline code.
 
+- A Detach button beside indexed method declarations in class source cards opens the method source directly, without adding symbol pins or moving existing cards.
+
 - Review Board supports right-drag panning, Shift-click and rectangle multi-selection, group movement, and opening cards where you click without moving your view.
 
 - Review Board’s selection rectangle is an unfilled outline that disappears on release while keeping enclosed or touched cards selected.

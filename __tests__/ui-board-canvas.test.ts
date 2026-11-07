@@ -341,6 +341,47 @@ describe('Board relationship rendering', () => {
     return recipe;
   }
 
+  it('detaches directly at a class source declaration without cached member identity, new pins, source refetches or moved existing cards', async () => {
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(530);
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(310);
+    legacyDetachedBoard();
+    calls.boardSearch.mockResolvedValue({ items: [clone(a)], symbols: [clone(a)], total: 1, nextOffset: null, bounded: false });
+    await render(); await click('+ Add symbols'); button('Source', host.querySelector('.library .result')!).click(); await settle();
+    const owner = host.querySelector<HTMLElement>('[data-code-card="a"]')!;
+    await vi.waitFor(() => expect(owner.querySelector('[data-detach-source="m0"]')).not.toBeNull());
+    expect(owner.querySelector('[data-detach-source="m0"]')?.closest('[data-line]')?.getAttribute('data-line')).toBe('2');
+    input('Board name', 'Direct detach'); await click('Save');
+    const before = calls.saveBoard.mock.calls.at(-1)![0].document;
+    expect(before.symbols).toHaveLength(1); expect(before.symbols[0].included).toBe(false);
+    const reads = calls.source.mock.calls.filter(([request]) => request.from === 1).length;
+    button('Detach Alpha.member0 source at line 2', owner).click(); await settle();
+    await vi.waitFor(() => expect(owner.querySelector('[data-source-fold="m0"]')).not.toBeNull());
+    expect(host.querySelector('[data-code-card="m0"]')?.textContent).toContain('METHOD_BODY_MARKER');
+    expect(owner.querySelector('[data-detach-source="m0"]')).toBeNull();
+    expect(calls.source.mock.calls.filter(([request]) => request.from === 1)).toHaveLength(reads);
+    expect(host.querySelectorAll('.svelte-flow__node-symbol')).toHaveLength(0);
+    await click('Save'); const after = calls.saveBoard.mock.calls.at(-1)![0].document;
+    expect(after.cards).toHaveLength(2); expect(after.symbols.every((item) => !item.included)).toBe(true);
+    expect(after.cards[0].position).toEqual(before.cards[0].position); expect(after.viewport).toEqual(before.viewport);
+    [...owner.querySelectorAll('[data-source-fold="m0"] button')].find((button) => button.textContent === 'Reattach')!.click(); await settle();
+    await vi.waitFor(() => expect(owner.querySelector('[data-detach-source="m0"]')).not.toBeNull());
+    expect(host.querySelector('[data-code-card="m0"]')).toBeNull();
+  });
+
+  it('does not turn ancestor-only or drifted class source facts into inline Detach actions', async () => {
+    const recipe = legacyDetachedBoard(); recipe.cards = recipe.cards.slice(0, 1); recipe.symbols = recipe.symbols.slice(0, 1);
+    records.get('a')!.document = recipe;
+    calls.board.mockImplementation(async (ids) => ({ ...snapshot(ids), scopeIds: [...ids], relations: [] }));
+    await render(); await open();
+    const owner = host.querySelector<HTMLElement>('[data-code-card="a"]')!;
+    await vi.waitFor(() => expect(owner.textContent).toContain('METHOD_BODY_MARKER'));
+    expect(owner.querySelector('[data-detach-source]')).toBeNull();
+    calls.board.mockImplementation(async (ids) => snapshot(ids));
+    calls.source.mockResolvedValue({ file: a.file, language: 'typescript', drift: true, showing: 'none', contentHash: 'changed', indexedAt: 1, generated: false, totalLines: 100 });
+    await click('Collapse code card Alpha'); await click('Expand code card Alpha');
+    expect(owner.querySelector('[data-detach-source]')).toBeNull();
+  });
+
   it('automatically detaches existing saved class/method source cards without changing their recipe or placement, and reattaches by closing the method card', async () => {
     vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(530);
     vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(310);
