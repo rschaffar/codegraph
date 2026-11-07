@@ -63,6 +63,7 @@
               {/if}
               {#if data.canPinMembers}<button aria-label={`Hide member ${row.symbol.qualifiedName}`} onclick={() => data.act('hide', row.symbol.id)}>Hide</button>{/if}
             {/if}
+            {#if data.canOpenSiblingSources && (row.symbol.kind === 'function' || row.symbol.kind === 'method')}<button disabled={data.siblingsBusy} aria-label={`Open sibling sources for ${row.symbol.qualifiedName}`} onclick={(event) => data.act('siblingSources', row.symbol.id, event)}>Sibling sources</button>{/if}
             <button class="links" aria-label={`Connections for ${row.symbol.qualifiedName}`} onclick={() => data.act('connections', row.symbol.id)}>Links…</button>
           </div>
           {#if row.handles && !row.hidden}<Handle type="source" position={Position.Right} id={`out-${row.symbol.id}`} isConnectable={false} tabindex={-1} aria-hidden="true" />{/if}
@@ -102,6 +103,7 @@
   <div class="actions nodrag nopan nokey">
     <button class="connections" aria-label={`Connections for ${data.symbol.qualifiedName}`} onclick={() => data.act('connections', id)}>Connections…</button>
     <button aria-label={`Open ${data.symbol.qualifiedName} source`} onclick={(event) => data.act('code', id, event)}>Source ↗</button>
+    {#if data.canOpenSiblingSources && (data.symbol.kind === 'function' || data.symbol.kind === 'method')}<button disabled={data.siblingsBusy} aria-label={`Open sibling sources for ${data.symbol.qualifiedName}`} onclick={(event) => data.act('siblingSources', id, event)}>Sibling sources</button>{/if}
   </div>
   {#if data.memberCount || data.retainedMemberCount || data.memberRows?.length}
     <div class="member-toggle nodrag nopan nokey"><button aria-label={`${data.expanded ? 'Collapse' : 'Expand'} ${data.symbol.qualifiedName} members`}
@@ -129,7 +131,7 @@
   .identity { display: flex; gap: 8px; flex-wrap: wrap; font: 10px var(--mono); color: var(--ink-3); overflow-wrap: anywhere; }
   .kind { color: var(--accent); }
   p { font-size: 12px; line-height: 1.4; margin: 7px 0 0; }
-  .actions { display: flex; justify-content: space-between; border-top: 1px solid var(--rule-faint); padding: 8px 12px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; border-top: 1px solid var(--rule-faint); padding: 8px 12px; }
   .actions button { font-size: 11px; }
   .connections { color: var(--accent); font-weight: 600; }
   .member-toggle { border-top: 1px solid var(--rule-faint); padding: 7px 12px; }

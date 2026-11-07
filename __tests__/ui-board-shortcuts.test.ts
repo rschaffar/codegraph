@@ -10,13 +10,18 @@ import { addToBoard, boardRequests } from '../ui/src/lib/board-requests.svelte';
 import { boardHref, fileHref, hashNavigation, setNavigationDriver, symbolHref, type NavigationDriver } from '../ui/src/lib/navigation';
 import { setGraphAdapter, type GraphAdapter, type SourceRequest } from '../ui/src/lib/adapter';
 import type { BoardEvidence, BoardSymbol } from '../ui/src/lib/board-model';
-import type { BoardConnectionRequest } from '../ui/src/lib/board-wire';
+import type { BoardConnections, BoardConnectionRequest, BoardEvidencePage } from '../ui/src/lib/board-wire';
+import { BOARD_SOURCE_TARGET_PAGE, BOARD_SOURCE_EVIDENCE_PAGE, BOARD_SOURCE_AUTO_REQUESTS } from '../ui/src/lib/board-source-model';
 import type { WireFileCodePayload, WireFilePayload, WireNodeRef, WireSource, WireSymbolPayload } from '../ui/src/lib/wire';
 import { live } from '../ui/src/lib/live.svelte';
 
-// The pointer resizer needs a Flow provider; these tests exercise the card's
-// own keyboard controls. The real provider/canvas is covered by the parent.
-vi.mock('@xyflow/svelte', () => ({ NodeResizer: () => {} }));
+// These seams require a Flow provider in production. Real handle geometry and
+// pointer resizing are covered by the canvas suite, not these isolated cards.
+const flow = vi.hoisted(() => ({ updateNodeInternals: vi.fn() }));
+vi.mock('@xyflow/svelte', () => ({
+  NodeResizer: () => {}, Handle: () => {}, Position: { Left: 'left', Right: 'right' },
+  useUpdateNodeInternals: () => flow.updateNodeInternals,
+}));
 
 const symbol: BoardSymbol & WireNodeRef = {
   id: 'class:container', kind: 'class', name: 'Container', qualifiedName: 'Container', file: 'src/example.ts',
@@ -49,12 +54,17 @@ function makeAdapter() {
     nodes: vi.fn(async (ids: readonly string[]) => ({ items: [symbol, target, second].filter((item) => ids.includes(item.id)), missing: [] })),
     source: vi.fn(async (request: SourceRequest) => slice(request)),
     board: vi.fn(async () => ({ symbols: [], relations: [], included: [], missing: [], bounded: false, notes: [], nodeKinds: [], edgeKinds: [] })),
-    boardConnections: vi.fn(async (request: BoardConnectionRequest) => ({
+    boardConnections: vi.fn(async (request: BoardConnectionRequest, _signal?: AbortSignal): Promise<BoardConnections> => ({
       scope: symbol, direction: 'outgoing', withMembers: request.members, symbols: [symbol, target, second], total: 2,
       items: request.offset ? [{ target: second, evidence: [{ ...edge, id: 'edge:3', target: second.id, kind: 'contains' }], total: 1 }] : [{ target, evidence: [edge], total: 2 }],
       nextOffset: request.offset ? null : 1, bounded: true, notes: ['Evidence is paged.'], excluded: noExclusions,
     })),
-    boardEvidence: vi.fn(async () => ({ symbols: [symbol, target], items: [{ ...edge, id: 'edge:2', line: 450, provenance: 'heuristic', registeredAt: 'src/wiring.ts:20' }], total: 2, nextOffset: null, bounded: false, notes: [] })),
+    boardEvidence: vi.fn(async (request: BoardConnectionRequest, _signal?: AbortSignal): Promise<BoardEvidencePage> => ({
+      symbols: [symbol, target, second], items: request.target === second.id
+        ? [{ ...edge, id: 'edge:3', target: second.id, kind: 'contains' }]
+        : [edge, { ...edge, id: 'edge:2', line: 450, provenance: 'heuristic', registeredAt: 'src/wiring.ts:20' }].slice(request.offset ?? 0),
+      total: request.target === second.id ? 1 : 2, nextOffset: null, bounded: false, notes: [], excluded: noExclusions,
+    })),
     file: vi.fn(async () => file), fileCode: vi.fn(async () => fileCode),
   };
   return { calls, adapter: calls as unknown as GraphAdapter };
@@ -71,6 +81,14 @@ function button(label: string): HTMLButtonElement {
 async function settle(): Promise<void> {
   for (let turn = 0; turn < 5; turn++) { await new Promise((resolve) => setTimeout(resolve, 0)); flushSync(); }
 }
+async function until(assertion: () => void): Promise<void> {
+  await vi.waitFor(() => { flushSync(); assertion(); }, { timeout: 5000, interval: 5 });
+}
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
 function cardProps(overrides: Partial<ComponentProps<typeof BoardSourceCard>['data']> = {}, id = 'card:one'): ComponentProps<typeof BoardSourceCard> {
   return { id, type: 'code', data: { symbolId: symbol.id, symbol, collapsed: false, close: vi.fn(), toggle: vi.fn(), read: vi.fn(), ...overrides },
     selected: false, dragging: false, isConnectable: false, deletable: true, selectable: true, zIndex: 1,
@@ -81,7 +99,7 @@ function renderCard(overrides: Partial<ComponentProps<typeof BoardSourceCard>['d
 }
 beforeEach(() => {
   host = document.createElement('div'); document.body.appendChild(host); mounted = [];
-  boardRequests.take(); adapter = makeAdapter(); setGraphAdapter(adapter.adapter); navigate = vi.fn();
+  boardRequests.take(); adapter = makeAdapter(); setGraphAdapter(adapter.adapter); navigate = vi.fn(); flow.updateNodeInternals.mockClear();
   setNavigationDriver({ ...hashNavigation, boardHref: () => '/workspace/review/board', navigate });
   vi.stubGlobal('fetch', vi.fn(() => { throw new Error('Unexpected direct network access'); }));
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
@@ -165,7 +183,7 @@ describe('linked source cards', () => {
       bounded: false, notes: [], excluded: noExclusions });
     const follow = vi.fn(); renderCard({ follow }); renderCard({}, 'card:two'); await settle();
     expect(host.querySelectorAll('[data-code-card]')).toHaveLength(2);
-    expect(adapter.calls.boardConnections.mock.calls[0][0]).toMatchObject({ id: symbol.id, direction: 'outgoing', members: true, tests: false, generated: false, uncertain: false, limit: 8 });
+    expect(adapter.calls.boardConnections.mock.calls[0][0]).toMatchObject({ id: symbol.id, direction: 'outgoing', members: true, tests: false, generated: false, uncertain: false, limit: BOARD_SOURCE_TARGET_PAGE });
     expect(adapter.calls.boardEvidence).not.toHaveBeenCalled();
     const ref = host.querySelector<HTMLElement>('.source [role="link"]')!;
     expect(ref.textContent).toBe('render'); expect(ref.title).toContain('references Renderer.render');
@@ -179,23 +197,29 @@ describe('linked source cards', () => {
     expect(host.querySelectorAll('.source [role="link"]')).toHaveLength(2);
   });
 
-  it('never links a same-site target that is ambiguous on a later target page', async () => {
+  it('automatically loads a late ambiguous target without ever linking the prefix', async () => {
     const peers = Array.from({ length: 9 }, (_, index) => ({ ...target, id: `method:peer${index}`,
       name: index === 0 || index === 8 ? 'render' : `other${index}`, qualifiedName: index === 0 ? 'A.render' : index === 8 ? 'Z.render' : `Peer.other${index}` }));
-    adapter.calls.boardConnections.mockImplementation(async (request) => {
-      const page = request.offset ? peers.slice(8) : peers.slice(0, 8);
+    const late = deferred<BoardConnections>();
+    const pageFor = (offset: number): BoardConnections => {
+      const page = offset ? peers.slice(8) : peers.slice(0, 8);
       return { scope: symbol, direction: 'outgoing', withMembers: true, symbols: [symbol, ...page],
         items: page.map((target) => ({ target, evidence: [{ ...edge, id: `edge:${target.id}`, target: target.id }], total: 1 })),
-        total: 9, nextOffset: request.offset ? null : 8, bounded: false, notes: [], excluded: noExclusions };
-    });
-    const follow = vi.fn(); renderCard({ follow }); await settle();
+        total: 9, nextOffset: offset ? null : 8, bounded: false, notes: [], excluded: noExclusions };
+    };
+    adapter.calls.boardConnections.mockImplementation(async (request) => request.offset ? late.promise : pageFor(0));
+    const follow = vi.fn(); renderCard({ follow });
+    await until(() => expect(adapter.calls.boardConnections).toHaveBeenCalledTimes(2));
     expect(host.querySelector('.source [role="link"]')).toBeNull();
-    expect(host.textContent).toContain('Inline target links are withheld');
+    expect(host.textContent).toContain('Inline target links wait for complete');
     host.querySelector<HTMLButtonElement>('.target-link')!.click();
     expect(follow).toHaveBeenCalledWith(expect.objectContaining({ id: peers[0].id }), undefined, expect.any(MouseEvent));
-    button('Load more targets (8 of 9)').click(); await settle();
+    late.resolve(pageFor(8));
+    await until(() => expect(host.textContent).toContain('Z.render'));
+    await settle();
     expect(host.querySelector('.source [role="link"]')).toBeNull();
-    expect(host.textContent).toContain('Z.render');
+    expect(host.textContent).not.toContain('Inline target links wait'); // Complete, but genuinely ambiguous.
+    expect(adapter.calls.boardConnections.mock.calls.map(([request]) => request.offset)).toEqual([0, 8]);
     expect(adapter.calls.board).not.toHaveBeenCalled();
   });
 
@@ -208,16 +232,170 @@ describe('linked source cards', () => {
     expect(host.querySelector('.target-link')?.textContent).toContain('Renderer.render');
   });
 
-  it('pages target discovery and evidence only on explicit Load more, retaining raw kind metadata', async () => {
-    renderCard(); await settle();
+  it('automatically pages targets and replaces capped previews, retaining raw kind metadata', async () => {
+    renderCard();
+    await until(() => expect(host.textContent).not.toContain('Loading indexed references…'));
+    await until(() => expect(adapter.calls.boardEvidence).toHaveBeenCalledTimes(2));
+    await settle();
     button('Show evidence').click(); flushSync();
-    expect(adapter.calls.boardEvidence).not.toHaveBeenCalled();
-    button('Load more evidence (1 of 2)').click(); await settle();
-    expect(adapter.calls.boardEvidence).toHaveBeenCalledWith(expect.objectContaining({ id: symbol.id, target: target.id, offset: 1, limit: 40, tests: false, generated: false, uncertain: false }), expect.any(AbortSignal));
+    expect(adapter.calls.boardEvidence).toHaveBeenCalledWith(expect.objectContaining({ id: symbol.id, target: target.id, offset: 0, limit: BOARD_SOURCE_EVIDENCE_PAGE, tests: false, generated: false, uncertain: false }), expect.any(AbortSignal));
+    expect(adapter.calls.boardEvidence).toHaveBeenCalledWith(expect.objectContaining({ target: second.id, offset: 0 }), expect.any(AbortSignal));
     expect(host.textContent).toContain('wired at src/wiring.ts:20');
-    button('Load more targets (1 of 2)').click(); await settle();
-    expect(adapter.calls.boardConnections.mock.calls[1][0]).toMatchObject({ offset: 1, limit: 8 });
+    expect(adapter.calls.boardConnections.mock.calls[1][0]).toMatchObject({ offset: 1, limit: BOARD_SOURCE_TARGET_PAGE });
     expect(host.textContent).toContain('Loaded kinds: contains');
+    expect(host.textContent).not.toContain('Inline target links wait');
+    expect(host.querySelector('.source [role="link"]')).not.toBeNull();
+    expect(adapter.calls.board).not.toHaveBeenCalled();
+  });
+
+  it('automatically completes a class with more than eight targets and forty evidence sites', async () => {
+    const peers = Array.from({ length: BOARD_SOURCE_TARGET_PAGE + 1 }, (_, index) => index === 0 ? target
+      : { ...second, id: `peer:${index}`, name: `other${index}`, qualifiedName: `Peer.other${index}` });
+    const edges = Array.from({ length: BOARD_SOURCE_EVIDENCE_PAGE + 1 }, (_, index) => ({ ...edge, id: `site:${index}` }));
+    let active = 0; let maxActive = 0;
+    adapter.calls.boardConnections.mockImplementation(async (request) => {
+      maxActive = Math.max(maxActive, ++active);
+      const offset = request.offset ?? 0;
+      const page = peers.slice(offset, offset + request.limit!);
+      await Promise.resolve(); active--;
+      return { scope: symbol, direction: 'outgoing', withMembers: true, symbols: [symbol, ...page],
+        items: page.map((peer) => ({ target: peer, evidence: peer.id === target.id ? edges.slice(0, 10)
+          : [{ ...edge, id: `site:${peer.id}`, target: peer.id }], total: peer.id === target.id ? edges.length : 1 })),
+        total: peers.length, nextOffset: offset + page.length < peers.length ? offset + page.length : null,
+        bounded: offset === 0, notes: ['Evidence per target is a bounded preview.'], excluded: noExclusions };
+    });
+    adapter.calls.boardEvidence.mockImplementation(async (request) => {
+      maxActive = Math.max(maxActive, ++active);
+      const peer = peers.find((item) => item.id === request.target)!;
+      const all = peer.id === target.id ? edges : [{ ...edge, id: `site:${peer.id}`, target: peer.id }];
+      const offset = request.offset ?? 0;
+      const items = all.slice(offset, offset + request.limit!);
+      await Promise.resolve(); active--;
+      return { symbols: [symbol, peer], items, total: all.length,
+        nextOffset: offset + items.length < all.length ? offset + items.length : null,
+        bounded: false, notes: [], excluded: noExclusions };
+    });
+    renderCard();
+    await until(() => expect(host.querySelector('.source [role="link"]')).not.toBeNull());
+    expect(host.querySelectorAll('.target')).toHaveLength(peers.length);
+    expect(adapter.calls.boardConnections.mock.calls.map(([request]) => request.offset)).toEqual([0, BOARD_SOURCE_TARGET_PAGE]);
+    expect(adapter.calls.boardEvidence.mock.calls.filter(([request]) => request.target === target.id).map(([request]) => request.offset)).toEqual([0, BOARD_SOURCE_EVIDENCE_PAGE]);
+    expect(adapter.calls.boardEvidence.mock.calls.every(([request]) => request.limit === BOARD_SOURCE_EVIDENCE_PAGE)).toBe(true);
+    expect(host.textContent).toContain(`${edges.length} of ${edges.length} indexed relationships`);
+    expect(host.querySelectorAll('.source [role="link"]')).toHaveLength(1);
+    expect(maxActive).toBe(1);
+    expect(host.textContent).not.toContain('Inline target links wait');
+    expect(adapter.calls.board).not.toHaveBeenCalled(); expect(boardRequests.pending).toEqual([]);
+  });
+
+  it('keeps hard scope bounds and unknown exclusions suppressing inline links after automatic paging', async () => {
+    for (const reason of ['hard-bound', 'unknown-exclusions'] as const) {
+      adapter.calls.boardConnections.mockResolvedValue({ scope: symbol, direction: 'outgoing', withMembers: true,
+        symbols: [symbol, target], items: [{ target, evidence: [edge], total: 1 }], total: 1, nextOffset: null,
+        bounded: true, notes: [], excluded: noExclusions });
+      adapter.calls.boardEvidence.mockResolvedValue({ symbols: [symbol, target], items: [edge], total: 1, nextOffset: null,
+        bounded: reason === 'hard-bound', notes: [], ...(reason === 'hard-bound' ? { excluded: noExclusions } : {}) });
+      const follow = vi.fn(); renderCard({ follow });
+      await until(() => expect(adapter.calls.boardEvidence).toHaveBeenCalledTimes(1)); await settle();
+      expect(host.querySelector('.source [role="link"]'), reason).toBeNull();
+      expect(host.textContent).toContain('Inline target links wait');
+      host.querySelector<HTMLButtonElement>('.target-link')!.click();
+      expect(follow).toHaveBeenCalledWith(expect.objectContaining({ id: target.id }), undefined, expect.any(MouseEvent));
+      await unmount(mounted.pop()!); host.replaceChildren(); adapter.calls.boardEvidence.mockClear();
+    }
+  });
+
+  it('cancels in-flight evidence on collapse and ignores its late response before a fresh expansion', async () => {
+    adapter.calls.boardConnections.mockResolvedValue({ scope: symbol, direction: 'outgoing', withMembers: true,
+      symbols: [symbol, target], items: [{ target, evidence: [edge], total: 2 }], total: 1, nextOffset: null,
+      bounded: true, notes: [], excluded: noExclusions });
+    const late = deferred<BoardEvidencePage>();
+    adapter.calls.boardEvidence.mockImplementationOnce(() => late.promise);
+    const props = cardProps({ sourceState: vi.fn() }); const values = new SvelteMap([['data', props.data]]);
+    mounted.push(mount(BoardSourceCard, { target: host, props: { ...props, get data() { return values.get('data')!; } } }));
+    await until(() => expect(adapter.calls.boardEvidence).toHaveBeenCalledTimes(1));
+    const signal = adapter.calls.boardEvidence.mock.calls[0][1]!;
+    expect(signal.aborted).toBe(false);
+    values.set('data', { ...values.get('data')!, collapsed: true }); flushSync();
+    expect(signal.aborted).toBe(true);
+    expect(props.data.sourceState).toHaveBeenLastCalledWith(symbol.id, expect.objectContaining({ indexed: false }));
+    late.resolve({ symbols: [symbol, target], items: [edge, { ...edge, id: 'stale', line: 450 }], total: 2,
+      nextOffset: null, bounded: false, notes: [], excluded: noExclusions });
+    await settle();
+    expect(host.querySelector('.source')).toBeNull();
+    expect(adapter.calls.boardEvidence).toHaveBeenCalledTimes(1);
+    values.set('data', { ...values.get('data')!, collapsed: false });
+    await until(() => expect(host.querySelector('.source [role="link"]')).not.toBeNull());
+    expect(adapter.calls.nodes).toHaveBeenCalledTimes(2);
+    expect(adapter.calls.boardEvidence).toHaveBeenCalledTimes(2);
+    expect(host.textContent).not.toContain('stale');
+    expect(flow.updateNodeInternals).toHaveBeenCalledWith('card:one');
+    expect(flow.updateNodeInternals.mock.calls.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('aborts pending target discovery on unmount without starting late evidence requests', async () => {
+    const late = deferred<BoardConnections>();
+    adapter.calls.boardConnections.mockImplementationOnce(() => late.promise);
+    renderCard(); await until(() => expect(adapter.calls.boardConnections).toHaveBeenCalledTimes(1));
+    const signal = adapter.calls.boardConnections.mock.calls[0][1]!;
+    await unmount(mounted.pop()!);
+    expect(signal.aborted).toBe(true);
+    late.resolve({ scope: symbol, direction: 'outgoing', withMembers: true, symbols: [symbol, target],
+      items: [{ target, evidence: [edge], total: 2 }], total: 1, nextOffset: null,
+      bounded: true, notes: [], excluded: noExclusions });
+    await settle();
+    expect(host.querySelector('[data-code-card]')).toBeNull();
+    expect(adapter.calls.boardEvidence).not.toHaveBeenCalled();
+    expect(adapter.calls.boardConnections).toHaveBeenCalledTimes(1);
+  });
+
+  it('pauses at the automatic request budget and only continues a larger scope explicitly', async () => {
+    adapter.calls.source.mockImplementation(async (request) => ({ ...slice(request), to: 3,
+      lines: ['class Container {', 'object.render();', '}'] }));
+    const peers = Array.from({ length: BOARD_SOURCE_AUTO_REQUESTS + 1 }, (_, index) => index === 0 ? target
+      : { ...second, id: `peer:${index}`, name: `other${index}`, qualifiedName: `Peer.other${index}` });
+    adapter.calls.boardConnections.mockImplementation(async (request) => {
+      const offset = request.offset ?? 0; const peer = peers[offset];
+      return { scope: symbol, direction: 'outgoing', withMembers: true, symbols: [symbol, peer],
+        items: [{ target: peer, evidence: [{ ...edge, id: `site:${peer.id}`, target: peer.id }], total: 1 }],
+        total: peers.length, nextOffset: offset + 1 < peers.length ? offset + 1 : null,
+        bounded: false, notes: [], excluded: noExclusions };
+    });
+    renderCard();
+    await until(() => {
+      expect(adapter.calls.boardConnections).toHaveBeenCalledTimes(BOARD_SOURCE_AUTO_REQUESTS);
+      expect(host.textContent).not.toContain('Loading indexed references…');
+    });
+    expect(host.querySelector('.source [role="link"]')).toBeNull();
+    expect(host.textContent).toContain('Inline target links wait');
+    await settle(); expect(adapter.calls.boardConnections).toHaveBeenCalledTimes(BOARD_SOURCE_AUTO_REQUESTS);
+    button(`Continue loading references (${BOARD_SOURCE_AUTO_REQUESTS} of ${peers.length} targets)`).click();
+    await until(() => expect(host.querySelector('.source [role="link"]')).not.toBeNull());
+    expect(adapter.calls.boardConnections).toHaveBeenCalledTimes(peers.length);
+    expect(adapter.calls.boardEvidence).not.toHaveBeenCalled();
+    expect(host.textContent).not.toContain('Continue loading references');
+    expect(boardRequests.pending).toEqual([]);
+  });
+
+  it.each(['stalled-targets', 'changed-total', 'overlapping-evidence'] as const)('withholds inline links on %s instead of certifying a loaded prefix', async (failure) => {
+    adapter.calls.boardConnections.mockImplementation(async (request) => ({ scope: symbol, direction: 'outgoing', withMembers: true,
+      symbols: [symbol, target, second],
+      items: request.offset ? (failure === 'stalled-targets' ? [] : [{ target: second, evidence: [{ ...edge, id: 'next', target: second.id }], total: 1 }])
+        : [{ target, evidence: [edge], total: failure === 'overlapping-evidence' ? 2 : 1 }],
+      total: failure === 'overlapping-evidence' ? 1 : request.offset && failure === 'changed-total' ? 3 : 2,
+      nextOffset: failure === 'overlapping-evidence' || request.offset ? null : 1,
+      bounded: false, notes: [], excluded: noExclusions }));
+    adapter.calls.boardEvidence.mockResolvedValue({ symbols: [symbol, target], items: [edge], total: 2,
+      nextOffset: null, bounded: false, notes: [], excluded: noExclusions });
+    renderCard();
+    await until(() => expect(host.textContent).not.toContain('Loading indexed references…'));
+    if (failure === 'overlapping-evidence') {
+      await until(() => expect(adapter.calls.boardEvidence).toHaveBeenCalledTimes(1));
+      button('Show evidence').click(); flushSync();
+      await until(() => expect(host.querySelector('[role="alert"]')?.textContent).toContain('overlap'));
+    } else await until(() => expect(host.querySelector('[role="alert"]')?.textContent).toMatch(/changed|advance/));
+    expect(host.querySelector('.source [role="link"]')).toBeNull();
+    expect(host.textContent).toContain('Inline target links wait');
     expect(adapter.calls.board).not.toHaveBeenCalled();
   });
 

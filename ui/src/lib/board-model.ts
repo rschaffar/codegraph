@@ -8,7 +8,7 @@ export interface BoardEvidence {
   id: string; source: string; target: string; kind: string; file?: string; line?: number; col?: number;
   confidence?: number; provenance?: string; synthesizedBy?: string; via?: string; registeredAt?: string; resolvedBy?: string;
 }
-export type SymbolAction = 'connections' | 'contents' | 'hide' | 'restore' | 'expand' | 'more' | 'code' | 'locate' | 'pin';
+export type SymbolAction = 'connections' | 'contents' | 'hide' | 'restore' | 'expand' | 'more' | 'code' | 'locate' | 'pin' | 'siblingSources';
 export type ActOnSymbol = (action: SymbolAction, id: string, event?: MouseEvent) => void;
 export interface BoardFilters { tests: boolean; generated: boolean; uncertain: boolean }
 /** Contiguous direct-child pages, separate from incidental ancestry/Connections facts. */
@@ -40,7 +40,9 @@ export interface SymbolData extends Record<string, unknown> {
   pinned: string[]; hidden: string[]; locatedMember?: string; undrawn: number; act: ActOnSymbol;
   memberRows?: BoardMemberRow[]; memberPages?: Record<string, BoardMemberPage>; locatedPath?: BoardSymbol[];
   /** Opt in only when the host handles the new pin action (the prototype need not). */
-  canPinMembers?: boolean; retainedMemberCount?: number;
+  canPinMembers?: boolean;
+  canOpenSiblingSources?: boolean;
+  siblingsBusy?: boolean; retainedMemberCount?: number;
   related?: boolean; relatedIds?: ReadonlySet<string>;
 }
 export interface CodeCardData extends Record<string, unknown> {
@@ -51,6 +53,10 @@ export interface SourceCardData extends CodeCardData {
   symbol: BoardSymbol; follow?: (target: BoardSymbol, line?: number, event?: MouseEvent) => void; highlight?: number | null;
   filters?: BoardFilters;
   resize?: (id: string, widthDelta: number, heightDelta: number) => void;
+  siblings?: (symbolId: string, event?: MouseEvent) => Promise<void>;
+  siblingsBusy?: boolean;
+  siblingsAvailable?: boolean;
+  sourceState?: (symbolId: string, state: { indexed: boolean; indexTick: number; diskTick: number }) => void;
 }
 export interface BoardRelation {
   id: string; source: string; target: string; sourceHandle: string; targetHandle: string;

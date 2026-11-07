@@ -12,6 +12,7 @@
   import type { BoardSnapshot, BoardDocument, BoardLoaded, BoardList, BoardSearch, BoardConnections, BoardConnectionRequest, BoardGroups } from '../../lib/board-wire';
   import { live } from '../../lib/live.svelte';
   import { boardRequests } from '../../lib/board-requests.svelte';
+  import { boardSourceRelations, boardSiblingSourceCapacity } from '../../lib/board-source-relations';
 
   const adapter = getGraphAdapter();
   const { fitView, screenToFlowPosition, getIntersectingNodes } = useSvelteFlow();
@@ -21,6 +22,13 @@
   type BoardNode = Node<SymbolData, 'symbol'> | Node<SourceCardData, 'code'>;
   let symbols = $state<BoardSymbol[]>([]);
   let relations = $state<BoardEvidence[]>([]);
+  let sourceSnapshot = $state<BoardSnapshot | null>(null);
+  let sourceSnapshotVersion = $state({ indexTick: -1, diskTick: -1 });
+  let sourceStates = $state<Record<string, { indexed: boolean; indexTick: number; diskTick: number }>>({});
+  let sourceNotes = $state<string[]>([]);
+  let sourceError = $state('');
+  let siblingsBusy = $state(false);
+  let siblingController: AbortController | null = null;
   let included = $state<string[]>([]);
   let hidden = $state<string[]>([]);
   let expanded = $state<string[]>([]);
@@ -100,7 +108,13 @@
   const model = $derived(createBoardModel(symbols, relations));
   const filters = $derived({ tests: includeTests, generated: includeGenerated, uncertain: includeUncertain });
   const projection = $derived(model.projectBoard(included, hidden, expanded, kind, structure, limits, { ...filters, locatedMember, memberPages, eligibleIds }));
-  const lanes = $derived(edgeLaneMap(projection.edges));
+  const sourceIdsKey = $derived(JSON.stringify(nodes.filter((node) => node.type === 'code').map((node) => node.data.symbolId).sort()));
+  const sourceEdges = $derived(boardSourceRelations(sourceSnapshot?.symbols ?? [], sourceSnapshot?.relations ?? [],
+    (JSON.parse(sourceIdsKey) as string[]).filter((id) => sourceStates[id]?.indexed &&
+      sourceStates[id].indexTick === live.indexTick && sourceStates[id].diskTick === live.diskTick &&
+      sourceSnapshotVersion.indexTick === live.indexTick && sourceSnapshotVersion.diskTick === live.diskTick), kind));
+  const canvasRelations = $derived([...projection.edges, ...sourceEdges]);
+  const lanes = $derived(edgeLaneMap(canvasRelations));
   const related = $derived(model.sourceSelection(selectedSources, included, hidden));
   const lastHidden = $derived([...hideHistory].reverse().find((id) => hidden.includes(id)));
   const codeCount = $derived(nodes.filter((node) => node.type === 'code').length);
@@ -108,7 +122,7 @@
   const readOnly = $derived(boardList?.readOnly !== false || !adapter.saveBoard);
   const allNodeKinds = $derived([...new Set([...nodeKinds, ...symbols.map((item) => item.kind), ...(groupPage?.items ?? []).flatMap((item) => item.byKind.map((entry) => entry.kind)), ...(libraryKind ? [libraryKind] : [])])]);
   const allEdgeKinds = $derived([...new Set([...edgeKinds, ...relations.map((item) => item.kind), ...(connectionPage?.items ?? []).flatMap((item) => item.evidence.map((edge) => edge.kind)), ...(kind ? [kind] : []), ...(connectionKind ? [connectionKind] : [])])]);
-  const edges = $derived<Edge[]>(projection.edges.map((edge) => {
+  const edges = $derived<Edge[]>(canvasRelations.map((edge) => {
     const lane = lanes.get(edge.id) ?? 0;
     const hot = evidence?.id === edge.id || (selectedSources.length ? edge.evidence.some((item) => related.evidenceIds.has(item.id)) : selected === edge.source || selected === edge.target);
     const uncertain = edge.evidence.some(isBoardEvidenceUncertain);
@@ -135,7 +149,7 @@
     panel = null; evidence = null;
     void tick().then(() => { if (returnFocus?.isConnected) returnFocus.focus(); else boardElement?.querySelector<HTMLElement>('[data-add-symbols]')?.focus(); });
   }
-  function display(id: string) { return symbols.find((item) => item.id === id)?.qualifiedName ?? id; }
+  function display(id: string) { return sourceSnapshot?.symbols.find((item) => item.id === id)?.qualifiedName ?? symbols.find((item) => item.id === id)?.qualifiedName ?? id; }
   function exclusionLabel(value?: BoardSnapshot['excluded']): string {
     if (!value) return '';
     return (['symbols', 'relations'] as const).map((unit) => {
@@ -155,9 +169,9 @@
       const position = old?.position ?? positions.get(item.symbol.id) ?? nextSymbolPosition(occupied, { x: 30 + (graph.length % 3) * 400, y: 30 });
       occupied.push({ position, width: 286, height: old?.measured?.height ?? 240 });
       graph.push({ ...old, id: item.symbol.id, type: 'symbol', position, dragHandle: '.board-drag-handle', connectable: false,
-        data: { ...item, hidden, pinned: included.filter((id) => !hidden.includes(id)), expanded: expanded.includes(item.symbol.id), locatedMember, canPinMembers: true, related: related.representatives.has(item.symbol.id), relatedIds: related.members, act } });
+        data: { ...item, hidden, pinned: included.filter((id) => !hidden.includes(id)), expanded: expanded.includes(item.symbol.id), locatedMember, canPinMembers: true, canOpenSiblingSources: !!adapter.boardSiblingSources, siblingsBusy, related: related.representatives.has(item.symbol.id), relatedIds: related.members, act } });
     }
-    nodes = [...graph, ...nodes.filter((node) => node.type === 'code').map((node) => node.type === 'code' ? { ...node, data: { ...node.data, filters, follow: followSource, resize: resizeCard } } : node)];
+    nodes = [...graph, ...nodes.filter((node) => node.type === 'code').map((node) => node.type === 'code' ? { ...node, data: { ...node.data, filters, follow: followSource, resize: resizeCard, siblings: openSiblingSources, siblingsBusy, siblingsAvailable: !!adapter.boardSiblingSources, sourceState: reportSourceState } } : node)];
   }
   // Flow replaces selection during a marquee, even with its multi-select key held.
   function startPointerSelection(event: PointerEvent) {
@@ -273,6 +287,7 @@
   function act(action: SymbolAction, id: string, event?: MouseEvent) {
     error = ''; evidence = null;
     if (action === 'connections') void openConnections(id);
+    else if (action === 'siblingSources') void openSiblingSources(id, event);
     else if (action === 'contents') void openConnections(id, { members: false, kind: 'contains' });
     else if (action === 'restore') void restoreHidden([id]);
     else if (action === 'pin') { event?.stopPropagation(); void add([id], openingPosition(event, 286, 240)); }
@@ -467,19 +482,77 @@
     });
   }
   function readCard(id: string) { void tick().then(() => fitView({ nodes: [{ id }], padding: 0.25, maxZoom: 1.1, duration: 200 })); }
-  function openCode(id: string, activate = true, highlight: number | null = null, event?: MouseEvent) {
+  function openCode(id: string, activate = true, highlight: number | null = null, event?: MouseEvent, position?: { x: number; y: number }) {
     event?.stopPropagation();
     if (codeCount >= 32 && !nodes.some((node) => node.id === `code:${id}`)) { error = 'Close a source card before opening another (maximum 32).'; return; }
     if (new Set([...included, ...expanded, ...hidden, ...nodes.filter((node) => node.type === 'code').map((node) => node.data.symbolId), id]).size > 128) { error = 'This board already retains 128 symbol identities. Close a source-only card or start another board.'; return; }
     const item = model.symbol(id); const key = `code:${id}`;
     if (nodes.some((node) => node.id === key)) nodes = nodes.map((node) => node.id === key && node.type === 'code' ? { ...node, selected: true, zIndex: ++zIndex, data: { ...node.data, highlight } } : { ...node, selected: false });
     else {
-      nodes = [...nodes.map((node) => ({ ...node, selected: false })), { id: key, type: 'code', position: openingPosition(event), width: 530, height: 310, selected: true, zIndex: ++zIndex, dragHandle: '.board-drag-handle', connectable: false,
-        data: { symbolId: id, symbol: item, collapsed: false, highlight, filters, follow: followSource, resize: resizeCard, close: closeCard, toggle: toggleCard, read: readCard } }];
+      nodes = [...nodes.map((node) => ({ ...node, selected: false })), { id: key, type: 'code', position: position ?? openingPosition(event), width: 530, height: 310, selected: true, zIndex: ++zIndex, dragHandle: '.board-drag-handle', connectable: false,
+        data: { symbolId: id, symbol: item, collapsed: false, highlight, filters, follow: followSource, resize: resizeCard, close: closeCard, toggle: toggleCard, read: readCard, siblings: openSiblingSources, siblingsBusy, siblingsAvailable: !!adapter.boardSiblingSources, sourceState: reportSourceState } }];
     }
     if (activate) { panel = null; evidence = null; void tick().then(() => boardElement?.querySelector<HTMLElement>(`[data-id="${CSS.escape(key)}"]`)?.focus({ preventScroll: true })); }
   }
-  async function compare(edge: BoardEvidence) { openCode(edge.source, false, edge.line ?? null); openCode(edge.target, false); panel = null; evidence = null; }
+  function reportSourceState(id: string, state: { indexed: boolean; indexTick: number; diskTick: number }) {
+    const old = sourceStates[id];
+    if (old?.indexed === state.indexed && old.indexTick === state.indexTick && old.diskTick === state.diskTick) return;
+    sourceStates = { ...sourceStates, [id]: state };
+  }
+  // Only card identities/filters/index revisions trigger this independent graph
+  // query. Dragging, resizing and selection never change either membership layer.
+  $effect(() => {
+    const ids = JSON.parse(sourceIdsKey) as string[]; const visibility = filters;
+    const version = { indexTick: live.indexTick, diskTick: live.diskTick };
+    const controller = new AbortController();
+    sourceSnapshot = null; sourceNotes = []; sourceError = '';
+    if (!ids.length || !adapter.board) return () => controller.abort();
+    adapter.board(ids.filter((id) => !id.startsWith('missing:')), controller.signal, visibility).then((value) => {
+      if (controller.signal.aborted) return;
+      sourceSnapshot = value; sourceSnapshotVersion = version;
+      sourceNotes = value.bounded ? ['Source-card relationships are bounded; shown arrows are a partial indexed view.', ...value.notes] : value.notes;
+    }).catch((cause) => { if (!controller.signal.aborted) sourceError = cause instanceof Error ? cause.message : String(cause); });
+    return () => controller.abort();
+  });
+  async function openSiblingSources(id: string, event?: MouseEvent) {
+    event?.stopPropagation();
+    if (!adapter.boardSiblingSources || siblingsBusy) return;
+    const controller = new AbortController(); siblingController = controller;
+    const generation = epoch; const visibility = { ...filters };
+    const index = live.indexTick; const disk = live.diskTick;
+    const anchor = openingPosition(event);
+    siblingsBusy = true; error = ''; refresh();
+    try {
+      const items = new Map<string, BoardSymbol>(); let offset: number | null = 0;
+      while (offset !== null) {
+        const page = await adapter.boardSiblingSources({ id, ...visibility, offset, limit: 100 }, controller.signal);
+        if (controller.signal.aborted || generation !== epoch) return;
+        if (page.scope?.kind === 'unavailable') throw new Error(page.notes?.join(' ') || 'No uniquely proven sibling scope is available.');
+        if (page.bounded) throw new Error('The sibling scope is incomplete or ambiguous; no source cards were opened. Inspect Connections instead.');
+        if (page.total > 32) throw new Error('This scope has more sibling sources than the 32-card board limit. Open individual sources through Connections instead.');
+        for (const item of page.items) items.set(item.id, item);
+        if (page.nextOffset !== null && page.nextOffset <= offset) throw new Error('Sibling paging did not advance; no source cards were opened.');
+        offset = page.nextOffset;
+      }
+      if (index !== live.indexTick || disk !== live.diskTick || JSON.stringify(visibility) !== JSON.stringify(filters)) throw new Error('The index, disk or filters changed during discovery. Try opening sibling sources again.');
+      const existing = nodes.filter((node) => node.type === 'code').map((node) => node.data.symbolId);
+      const capacity = boardSiblingSourceCapacity(existing, [...items.keys()], [...included, ...expanded, ...hidden]);
+      if (capacity) throw new Error(capacity);
+      merge([...items.values()]);
+      let added = 0;
+      for (const item of items.values()) if (!existing.includes(item.id)) {
+        openCode(item.id, false, null, undefined, { x: anchor.x + (added % 4) * 560, y: anchor.y + Math.floor(added / 4) * 340 }); added++;
+      }
+      notice = `${added} sibling source cards opened; ${items.size - added} already open. Symbol membership and existing positions unchanged.`;
+    } catch (cause) { if (!controller.signal.aborted && generation === epoch) fail(cause); }
+    finally { if (siblingController === controller) { siblingController = null; siblingsBusy = false; refresh(); } }
+  }
+  async function compare(edge: BoardEvidence) {
+    // A source-only class can expose method endpoints absent from the symbol
+    // diagram's cache. Admit just the two chosen source identities, never pins.
+    merge((sourceSnapshot?.symbols ?? []).filter((item) => item.id === edge.source || item.id === edge.target));
+    openCode(edge.source, false, edge.line ?? null); openCode(edge.target, false); panel = null; evidence = null;
+  }
   function tidy() {
     let x = 30; let y = 30; let height = 0;
     nodes = nodes.map((node) => { if (node.type !== 'symbol') return node; if (x > 900) { x = 30; y += height + 100; height = 0; }
@@ -489,6 +562,8 @@
   /** Reset reviewer-owned recipe/discovery state, not host capabilities or in-flight metadata writes. */
   function resetBoardState() {
     ++request; ++searchRequest; ++connectionRequest; ++groupRequest; ++memberGeneration;
+    siblingController?.abort(); siblingController = null; siblingsBusy = false;
+    sourceSnapshot = null; sourceStates = {}; sourceNotes = []; sourceError = '';
     memberPages = {}; symbols = []; relations = []; included = []; hidden = []; expanded = []; limits = {}; nodes = [];
     originalIdentities.clear(); positions.clear(); sourceHeights.clear(); snapshotIds = new Set(); eligibleIds = new Set();
     selected = null; selectedSources = []; locatedMember = undefined; hideHistory = []; zIndex = 10;
@@ -673,7 +748,7 @@
   }
   let seenIndex = live.indexTick;
   $effect(() => { const value = live.indexTick; if (value !== seenIndex) { seenIndex = value; untrack(() => { void refreshIndex(); }); } });
-  onMount(() => { void listBoards(); savedFingerprint = fingerprint(); });
+  onMount(() => { void listBoards(); savedFingerprint = fingerprint(); return () => { siblingController?.abort(); }; });
 </script>
 
 <svelte:window onbeforeunload={beforeUnload} {onkeydown} />
@@ -695,7 +770,8 @@
     <button onclick={exportBoard}>Export JSON</button><button disabled={!adapter.resolveBoard} onclick={() => importFile.click()}>Import JSON</button><input class="file-input" type="file" accept="application/json,.json" bind:this={importFile} onchange={importBoard} />
   </div>
   {#if error}<div class="error" role="alert">{error}<button onclick={() => error = ''} aria-label="Dismiss board error">×</button></div>{/if}
-  {#if notes.length}<details class="bounds"><summary>Index boundaries / query limits ({notes.length})</summary>{#each notes as note}<p>{note}</p>{/each}</details>{/if}
+  {#if sourceError}<div class="error" role="alert">Source-card connections: {sourceError}</div>{/if}
+  {#if notes.length || sourceNotes.length}<details class="bounds"><summary>Index boundaries / query limits ({notes.length + sourceNotes.length})</summary>{#each [...notes, ...sourceNotes] as note, i (i)}<p>{note}</p>{/each}</details>{/if}
   <div class="canvas" aria-label="Review board canvas" role="group" onpointerdowncapture={startPointerSelection} onpointercancel={() => { selectingRectangle = false; rectangleBase = []; rectangleOrigin = null; }}>
     <SvelteFlow bind:nodes bind:viewport {edges} {nodeTypes} {edgeTypes} minZoom={0.15} maxZoom={1.6} nodesConnectable={false} deleteKey={[]} zoomOnDoubleClick={false} panOnDrag={[2]} panActivationKey={[]} selectionOnDrag selectionKey={[]} multiSelectionKey="Shift" selectionMode={SelectionMode.Partial} autoPanOnNodeFocus={false} proOptions={{ hideAttribution: true }}
       onnodeclick={({ node, event }) => { if (!event.shiftKey) nodes = nodes.map((item) => ({ ...item, selected: item.id === node.id })); selected = node.type === 'symbol' ? node.id : model.targetState(node.data.symbolId, included, hidden).representative; if (node.type === 'code') nodes = nodes.map((item) => item.id === node.id ? { ...item, zIndex: ++zIndex } : item); }}
@@ -703,7 +779,7 @@
       onedgeclick={({ edge }) => showEvidence(edge)} onselectionchange={() => { retainRectangleSelection(); reflectSourceSelection(nodes.filter((node) => node.selected)); }} onpaneclick={() => { selected = null; evidence = null; }}>
       <Background gap={24} size={1} patternColor="var(--rule-soft)" /><Controls showLock={false} /><MiniMap pannable zoomable nodeColor={(node) => node.type === 'code' ? 'var(--press-2)' : 'var(--accent)'} />
     </SvelteFlow>
-    {#if !included.length}<section class="empty"><h2>Choose what you want to understand</h2><p>Add symbols from this index. Connections helps you follow only the targets you choose.</p></section>{/if}
+    {#if !included.length && !codeCount}<section class="empty"><h2>Choose what you want to understand</h2><p>Add symbols from this index. Connections helps you follow only the targets you choose.</p></section>{/if}
     {#if panel === 'library'}
       <aside class="panel library" aria-label="Symbol library"><div class="panel-heading"><h2 tabindex="-1">Add symbols</h2><button aria-label="Close symbol library" onclick={closePanel}>×</button></div>
         <div class="direction" aria-label="Selection source"><button class:active={libraryMode === 'symbols'} onclick={() => { libraryMode = 'symbols'; void search(); }}>Symbols</button><button class:active={libraryMode === 'folder'} disabled={!adapter.boardGroups} onclick={() => { libraryMode = 'folder'; groupPage = null; activeGroup = null; void groups(); }}>Folders</button><button class:active={libraryMode === 'namespace'} disabled={!adapter.boardGroups} onclick={() => { libraryMode = 'namespace'; groupPage = null; activeGroup = null; void groups(); }}>Namespaces</button></div>

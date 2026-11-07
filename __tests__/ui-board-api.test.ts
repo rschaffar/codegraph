@@ -49,6 +49,7 @@ const groups = (params: Record<string, string | number>) => get('/api/board/grou
 const members = (params: Record<string, string | number>) => get('/api/board/members', params);
 const connections = (params: Record<string, string | number>) => get('/api/board/connections', params);
 const search = (params: Record<string, string | number> = {}) => get('/api/board/search', params);
+const siblings = (params: Record<string, string | number>) => get('/api/board/sibling-sources', params);
 
 function endpointsResolve(body: any): void {
   const ids = new Set(body.symbols.map((s: any) => s.id));
@@ -64,6 +65,29 @@ beforeAll(async () => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-board-'));
   fs.mkdirSync(path.join(root, 'src'), { recursive: true });
   fs.writeFileSync(path.join(root, 'src/live.ts'), 'export class Actual { run() { return helper(); } }\nexport function helper() { return 1; }\n');
+  fs.writeFileSync(path.join(root, 'src/siblings.ts'), `
+export class SiblingExtracted {
+  first() { function local() {} return local(); }
+  second(value: string): string;
+  second(value: number): number;
+  second(value: string | number) { return value; }
+}
+export class OtherExtracted { unrelated() {} }
+export function freeFirst() { function nested() {} return nested(); }
+export function freeSecond() {}
+`);
+  fs.writeFileSync(path.join(root, 'src/siblings.py'), `
+class PythonOwner:
+    def first(self):
+        def local():
+            pass
+        return local()
+    def second(self):
+        pass
+class PythonOther:
+    def unrelated(self):
+        pass
+`);
   const cg = CodeGraph.initSync(root);
   await cg.indexAll();
   cg.resolveReferences();
@@ -207,13 +231,54 @@ beforeAll(async () => {
     add('all-kind-owner', 'module', 'outline/kinds.ts');
     for (const kind of NODE_KINDS) edge('all-kind-owner', `kind-${kind}`, 'contains');
     edge('all-kind-owner', 'future-node', 'contains');
+    // Sibling discovery uses real containment, not file/qualified-name guesses.
+    const sb = (id: string, kind: NodeKind = 'method', file = 'sibling/main.ts', name = id, line = 2, col = 0) => add(id, kind, file, name, line, col);
+    sb('sb-owner', 'struct'); sb('sb-other', 'interface'); sb('sb-namespace', 'namespace');
+    edge('sb-namespace', 'sb-owner', 'contains');
+    for (const [id, col] of [['sb-origin', 0], ['sb-overload-a', 1], ['sb-overload-b', 2]] as const) {
+      sb(id, 'method', 'sibling/main.ts', 'sbOverload', 3, col); edge('sb-owner', id, 'contains');
+    }
+    edge('sb-owner', 'sb-overload-a', 'contains', 9); // duplicate evidence, not two owners
+    sb('sb-wrapper', 'namespace'); edge('sb-owner', 'sb-wrapper', 'contains');
+    sb('sb-wrapped', 'function', 'sibling/impl.cpp'); edge('sb-wrapper', 'sb-wrapped', 'contains');
+    sb('sb-inner-type', 'class'); sb('sb-inner-method');
+    edge('sb-owner', 'sb-inner-type', 'contains'); edge('sb-inner-type', 'sb-inner-method', 'contains');
+    sb('sb-local', 'function'); edge('sb-origin', 'sb-local', 'contains');
+    sb('sb-unrelated'); edge('sb-other', 'sb-unrelated', 'contains');
+    sb('sb-ambiguous'); edge('sb-owner', 'sb-ambiguous', 'contains'); edge('sb-other', 'sb-ambiguous', 'contains');
+    for (const [id, file, metadata] of [
+      ['sb-test', 'sibling/main.test.ts', undefined],
+      ['sb-gen', 'sibling/schema.pb.go', undefined],
+      ['sb-content-gen', 'generated/ordinary.ts', undefined],
+      ['sb-weak', 'sibling/main.ts', { resolvedBy: 'name-only' }],
+      ['sb-test-weak', 'sibling/main.test.ts', { confidence: 0.1 }],
+    ] as const) { sb(id, 'method', file); edge('sb-owner', id, 'contains', 1, metadata); }
+    sb('sb-file', 'file'); sb('sb-free-origin', 'function'); sb('sb-free-peer', 'function');
+    sb('sb-free-ns', 'namespace'); sb('sb-free-wrapped', 'function');
+    edge('sb-file', 'sb-free-origin', 'contains'); edge('sb-file', 'sb-free-peer', 'contains');
+    edge('sb-file', 'sb-free-ns', 'contains'); edge('sb-free-ns', 'sb-free-wrapped', 'contains');
+    sb('sb-free-local', 'function'); edge('sb-free-origin', 'sb-free-local', 'contains');
+    sb('sb-root-function', 'function'); sb('sb-orphan-method'); sb('sb-missing-function', 'function');
+    sb('sb-prefix', 'function', 'sibling/main.ts.extra');
+    sb('sb-function-member', 'function'); edge('sb-other', 'sb-function-member', 'contains');
+    sb('sb-free-ambiguous', 'function'); edge('sb-file', 'sb-free-ambiguous', 'contains'); edge('sb-other', 'sb-free-ambiguous', 'contains');
+    sb('sb-deep-owner', 'protocol'); sb('sb-deep-origin'); edge('sb-deep-owner', 'sb-deep-origin', 'contains');
+    for (let i = 0; i < 66; i++) {
+      sb(`sb-depth-${i}`, 'namespace'); edge(i ? `sb-depth-${i - 1}` : 'sb-deep-owner', `sb-depth-${i}`, 'contains');
+    }
+    sb('sb-too-deep'); edge('sb-depth-65', 'sb-too-deep', 'contains');
+    sb('sb-wide-owner', 'trait'); sb('sb-wide-origin'); edge('sb-wide-owner', 'sb-wide-origin', 'contains');
+    for (let i = 0; i < MAX_BOARD_SCOPE + 3; i++) {
+      sb(`sb-wide-${String(i).padStart(4, '0')}`, 'method', 'sibling/wide.rs', 'overloaded', i + 1);
+      edge('sb-wide-owner', `sb-wide-${String(i).padStart(4, '0')}`, 'contains');
+    }
     db.prepare(`INSERT INTO unresolved_refs(from_node_id, reference_name, reference_kind, line, col)
       VALUES ('member', 'uninstalledPackage', 'calls', 15, 2)`).run();
     // Simulate an older/imported corrupt index without inventing a node.
     // Foreign keys are normally on, so insert the dangling boundary separately.
   })();
   db.pragma('foreign_keys = OFF');
-  db.prepare("INSERT INTO edges(source,target,kind,line) VALUES ('member','outside-index','calls',16), ('missing-parent','orphan','contains',1), ('missing-parent','partially-ambiguous','contains',1)").run();
+  db.prepare("INSERT INTO edges(source,target,kind,line) VALUES ('member','outside-index','calls',16), ('missing-parent','orphan','contains',1), ('missing-parent','partially-ambiguous','contains',1), ('missing-parent','sb-missing-function','contains',1)").run();
   db.pragma('foreign_keys = ON');
   evidenceIds = db.prepare("SELECT id FROM edges WHERE source='evidence-hub' ORDER BY id").all().map((r: any) => String(r.id));
   uncertainEvidenceIds = db.prepare("SELECT id FROM edges WHERE source='uncertainty-root' AND target='uncertainty-mixed' ORDER BY id").all().map((r: any) => String(r.id));
@@ -737,6 +802,86 @@ describe('Board direct member paging and filter-aware counts', () => {
   });
 });
 
+describe('Board read-only sibling source discovery', () => {
+  it('uses real TypeScript and Python owners, preserving overloads and excluding local functions/other classes', async () => {
+    for (const file of ['src/siblings.ts', 'src/siblings.py']) {
+      const found = await search({ path: file });
+      const origin = found.items.find((item: any) => item.name === 'first');
+      const page = await siblings({ id: origin.id });
+      expect(page.scope.kind).toBe('type');
+      expect(page.items.every((item: any) => item.name === 'second')).toBe(true);
+      expect(page.items).toHaveLength(file.endsWith('.ts') ? 3 : 1);
+      expect(new Set(page.items.map((item: any) => item.id)).size).toBe(page.items.length);
+      expect(page.nextOffset).toBeNull();
+    }
+  });
+
+  it('uses the nearest exact type across namespace wrappers and keeps same-name overload IDs/source ordering', async () => {
+    const page = await siblings({ id: 'sb-origin', limit: 2 });
+    expect(page.scope).toEqual({ kind: 'type', id: 'sb-owner', label: 'sibling/main.ts::sb-owner' });
+    expect(page.total).toBe(3);
+    expect(page.items.map((item: any) => item.id)).toEqual(['sb-wrapped', 'sb-overload-a']);
+    expect(page.nextOffset).toBe(2);
+    expect(page.bounded).toBe(false);
+    expect((await siblings({ id: 'sb-origin', offset: 2 })).items.map((item: any) => item.id)).toEqual(['sb-overload-b']);
+    expect(page.notes.join(' ')).toMatch(/Origin excluded/);
+    const wrapped = await siblings({ id: 'sb-wrapped' });
+    expect(wrapped.scope.id).toBe('sb-owner');
+    expect(wrapped.items.map((item: any) => item.id)).toEqual(['sb-origin', 'sb-overload-a', 'sb-overload-b']);
+    const inner = await siblings({ id: 'sb-inner-method' });
+    expect(inner.scope.id).toBe('sb-inner-type');
+    expect(inner.total).toBe(0);
+  });
+
+  it('returns exact-file top-level functions only, including indexed namespace/root functions', async () => {
+    const page = await siblings({ id: 'sb-free-origin' });
+    expect(page.scope).toEqual({ kind: 'file', label: 'sibling/main.ts' });
+    expect(page.items.map((item: any) => item.id).sort()).toEqual(['sb-free-peer', 'sb-free-wrapped', 'sb-root-function']);
+    expect(page.total).toBe(3);
+    const actual = await search({ path: 'src/siblings.ts', q: 'freeFirst' });
+    expect((await siblings({ id: actual.items[0].id })).items.map((item: any) => item.name)).toEqual(['freeSecond']);
+  });
+
+  it('applies normal disjoint test/generated/uncertain filters to ownership evidence', async () => {
+    const page = await siblings({ id: 'sb-origin' });
+    expect(page.excluded.symbols).toEqual({ tests: 2, generated: 2, uncertain: 1 });
+    expect(page.excluded.relations).toEqual({ tests: 0, generated: 0, uncertain: 0 });
+    const all = await siblings({ id: 'sb-origin', tests: 1, generated: 1, uncertain: 1 });
+    expect(all.total).toBe(8);
+    expect(all.excluded.symbols).toEqual({ tests: 0, generated: 0, uncertain: 0 });
+    const weakOrigin = await siblings({ id: 'sb-weak' });
+    expect(weakOrigin.total).toBe(0);
+    expect(weakOrigin.excluded.symbols).toEqual({ tests: 2, generated: 2, uncertain: 4 });
+  });
+
+  it('never guesses ambiguous, nested-local, cyclic, missing or non-callable scopes', async () => {
+    for (const id of ['sb-ambiguous', 'sb-local', 'sb-free-local', 'sb-orphan-method', 'sb-missing-function', 'cycle-a', 'orphan', 'partially-ambiguous', 'sb-owner']) {
+      const page = await siblings({ id });
+      expect(page.scope.kind, id).toBe('unavailable');
+      expect(page.total, id).toBe(0);
+      expect(page.notes.length, id).toBeGreaterThan(0);
+    }
+  });
+
+  it('bounds deep proof explicitly while paging hubs beyond the projection scope cap', async () => {
+    const deep = await siblings({ id: 'sb-deep-origin' });
+    expect(deep.bounded).toBe(true);
+    expect(deep.total).toBe(0);
+    expect(deep.notes.join(' ')).toMatch(/totals cover only proven candidates/);
+    const origin = await siblings({ id: 'sb-too-deep' });
+    expect(origin.scope.kind).toBe('unavailable');
+    expect(origin.bounded).toBe(true);
+    const first = await siblings({ id: 'sb-wide-origin', limit: 2 });
+    expect(first.total).toBe(MAX_BOARD_SCOPE + 3);
+    expect(first.nextOffset).toBe(2);
+    expect(first.bounded).toBe(false);
+    const last = await siblings({ id: 'sb-wide-origin', offset: MAX_BOARD_SCOPE + 2 });
+    expect(last.items.map((item: any) => item.id)).toEqual([`sb-wide-${MAX_BOARD_SCOPE + 2}`]);
+    expect(last.nextOffset).toBeNull();
+    expect((await siblings({ id: 'sb-wide-origin', offset: 99999 })).items).toEqual([]);
+  });
+});
+
 describe('Board snapshot consistency', () => {
   it('keeps counts, file classification, pages and facts in one snapshot and refreshes on the next request', () => {
     const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-board-snapshot-'));
@@ -796,6 +941,11 @@ describe('Board validation and read-only boundary', () => {
     ['/api/board/members', {}], ['/api/board/members', { id: 'owner', uncertain: 'true' }],
     ['/api/board/members', { id: 'owner', limit: 0 }], ['/api/board/members', { id: 'owner', offset: -1 }],
     ['/api/board/members', { id: 'owner', root: '/elsewhere' }],
+    ['/api/board/sibling-sources', {}],
+    ['/api/board/sibling-sources', { id: 'sb-origin', root: '/elsewhere' }],
+    ['/api/board/sibling-sources', { id: 'sb-origin', offset: '-1' }],
+    ['/api/board/sibling-sources', { id: 'sb-origin', limit: '101' }],
+    ['/api/board/sibling-sources', { id: 'sb-origin', uncertain: 'true' }],
     ['/api/board/connections', { id: 'owner', generated: 'true' }],
     ['/api/board/evidence', { id: 'owner', target: 'member', uncertain: '' }],
   ])('rejects invalid requests: %s %j', async (endpoint, params) => {
@@ -815,8 +965,11 @@ describe('Board validation and read-only boundary', () => {
     expect((await request('/api/board', { ids: '[]' }, 'HEAD')).status).toBe(200);
     expect((await request('/api/board/groups', { type: 'folder' }, 'HEAD')).status).toBe(200);
     expect((await request('/api/board/members', { id: 'owner' }, 'HEAD')).status).toBe(200);
+    expect((await request('/api/board/sibling-sources', { id: 'sb-origin' }, 'HEAD')).status).toBe(200);
+    expect((await request('/api/board/sibling-sources', { id: 'not-indexed' })).status).toBe(404);
+    expect((await request('/api/board/sibling-sources', { id: 'sb-origin' }, 'POST')).status).toBe(403);
     const index = await get('/api');
-    expect(index.endpoints.map((e: any) => e.path)).toEqual(expect.arrayContaining(['/api/board', '/api/board/search', '/api/board/groups', '/api/board/members', '/api/board/connections', '/api/board/evidence']));
+    expect(index.endpoints.map((e: any) => e.path)).toEqual(expect.arrayContaining(['/api/board', '/api/board/search', '/api/board/groups', '/api/board/members', '/api/board/sibling-sources', '/api/board/connections', '/api/board/evidence']));
     const refused = await request('/api/board', { ids: '[]' }, 'POST');
     expect(refused.status).not.toBe(200);
     expect(fs.existsSync(path.join(root, '.codegraph/ui/boards'))).toBe(false);

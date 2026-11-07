@@ -15,6 +15,10 @@ These describe `codegraph ui` and its screens. They were taken out of `## [Unrel
 
 ## New Features
 
+- Review Board can open the other methods in a class or free functions in a file as source cards with one click, without changing the symbol diagram.
+
+- Review Board draws typed connections between open source cards for calls, references and parameter or return types, separately from symbol-card connections and without import-level arrows.
+
 - Review Board supports right-drag panning, Shift-click and rectangle multi-selection, group movement, and opening cards where you click without moving your view.
 
 - Review Board’s selection rectangle is an unfilled outline that disappears on release while keeping enclosed or touched cards selected.
@@ -128,6 +132,8 @@ These describe `codegraph ui` and its screens. They were taken out of `## [Unrel
   Trails are plain JSON, one file per trail, under `.codegraph/ui/trails/` — already ignored by git, so they stay yours by default. **Export** hands you the file if you'd rather commit one for the team. Saved trails and Review Board arrangements are the only metadata the viewer writes: it still never indexes, never changes your graph, and never touches a line of your code. Start it with `codegraph ui --read-only` and it won't write even that — saved trails can still be opened, just not saved or deleted.
 
 ## Fixes
+
+- Class source cards automatically load reference pages so clickable code links no longer require manually expanding every evidence page in ordinary-sized classes.
 
 - The viewer now opens its index read-only even when saving arrangements is allowed, and explains when an incompatible or incomplete index needs attention outside the viewer.
 - Review Board restores exact hidden members and multiline identities, starts New with fresh state, and keeps saved arrangements and Connections history coherent during concurrent requests.

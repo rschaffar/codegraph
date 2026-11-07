@@ -12,6 +12,11 @@ export interface BoardGroupRequest extends BoardFilters { type: 'folder' | 'name
 export interface BoardGroups { items: Array<{ id: string; name: string; type: 'folder' | 'namespace'; path?: string; namespace?: string; total: number; byKind: Array<{ kind: string; count: number }> }>; total: number; nextOffset: number | null; bounded: boolean; notes: string[]; excluded?: BoardExclusions }
 export interface BoardMembers { symbols: BoardSymbol[]; items: BoardSymbol[]; total: number; nextOffset: number | null; bounded: boolean; notes: string[]; excluded?: BoardExclusions }
 export interface BoardMemberRequest extends BoardFilters { id: string; offset?: number; limit?: number }
+export interface BoardSiblingSourcesRequest extends BoardFilters { id: string; offset?: number; limit?: number }
+/** Source discovery only: excludes origin; symbols may include identity ancestors, not extra matches. */
+export interface BoardSiblingSources extends BoardSearch {
+  scope: { kind: 'type' | 'file' | 'unavailable'; id?: string; label: string };
+}
 export interface BoardSearch { items: BoardSymbol[]; symbols?: BoardSymbol[]; total: number; nextOffset: number | null; bounded: boolean; notes?: string[]; excluded?: BoardExclusions }
 export interface BoardConnectionRequest extends BoardFilters {
   id: string; direction: 'incoming' | 'outgoing'; members: boolean; kind?: string; q?: string; offset?: number; limit?: number; target?: string;

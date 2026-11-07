@@ -20,7 +20,7 @@ const require = createRequire(import.meta.url);
 process.env.CODEGRAPH_TELEMETRY = '0'; process.env.DO_NOT_TRACK = '1'; process.env.CODEGRAPH_NO_PROMPT_HOOK = '1';
 const viewerExecutable = process.env.CODEGRAPH_BOARD_EXECUTABLE ? fs.realpathSync(process.env.CODEGRAPH_BOARD_EXECUTABLE) : null;
 const CodeGraph = require(path.join(root, 'dist/index.js')).default;
-const work = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-board-browser-'));
+const work = fs.mkdtempSync(path.join(process.env.CODEGRAPH_BOARD_ARTIFACT_ROOT ?? os.tmpdir(), 'codegraph-board-browser-'));
 console.log(`Artifacts: ${work}`);
 const project = path.join(work, 'project');
 fs.mkdirSync(path.join(project, 'src'), { recursive: true });

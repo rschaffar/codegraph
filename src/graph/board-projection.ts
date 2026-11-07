@@ -64,6 +64,16 @@ export interface BoardFact {
   generated?: boolean;
 }
 
+export interface BoardSiblingScope {
+  kind: 'type' | 'file' | 'unavailable';
+  id?: string;
+  label: string;
+}
+
+const siblingTypes = new Set(['class', 'struct', 'interface', 'trait', 'protocol', 'enum', 'union', 'type_alias']);
+const siblingContainers = new Set(['file', 'module', 'namespace']);
+const siblingContainerSql = "('file', 'module', 'namespace')";
+
 export interface BoardScope {
   ids: string[];
   bounded: boolean;
@@ -338,6 +348,92 @@ export class BoardGraph {
     const rows = this.db.prepare(`${cte} SELECT id FROM board_candidates WHERE reason=0
       ORDER BY ${sourceOrder} LIMIT ? OFFSET ?`).all(...args, limit, offset) as { id: string }[];
     return { ids: rows.map(row => row.id), ...counts };
+  }
+
+  /** Other indexed callables, never inferred from names or source ranges.
+   * A unique contains chain may cross namespace/module/file wrappers, but never
+   * another callable/value/type. Parentless functions are indexed top-level roots.
+   * Duplicate evidence for one parent is not ambiguous; distinct parents are.
+   * Counts stay in SQL, with only a bounded page materialized in JS.
+   */
+  siblingSources(id: string, offset: number, limit: number, filters: BoardViewFilters, notes: string[]): {
+    ids: string[]; total: number; excluded: BoardExcludedCounts; scope: BoardSiblingScope; bounded: boolean;
+  } {
+    const origin = this.nodes([id]).get(id)!;
+    const unavailable = (note: string, bounded = false) => {
+      notes.push(note);
+      return { ids: [], total: 0, excluded: noBoardExclusions(), scope: { kind: 'unavailable' as const, label: 'No proven sibling scope' }, bounded };
+    };
+    if (origin.kind !== 'function' && origin.kind !== 'method') return unavailable('Sibling sources require an indexed function or method.');
+    let cursor = origin;
+    let owner: Node | undefined;
+    let originReason = 0;
+    const seen = new Set([id]);
+    for (let depth = 0; ; depth++) {
+      // LEFT JOIN retains missing parents: an incomplete index is not root proof.
+      const parents = this.db.prepare(`WITH ${pathCtes} SELECT e.source AS id, min(${edgeReason(filters)}) AS reason
+        FROM edges e LEFT JOIN nodes s ON s.id=e.source LEFT JOIN nodes t ON t.id=e.target
+        WHERE e.target=? AND e.kind='contains' GROUP BY e.source LIMIT 2`)
+        .all(...this.paths(), cursor.id) as { id: string; reason: number }[];
+      if (!parents.length) {
+        if (origin.kind !== 'function') return unavailable('No proven indexed type owner for this method; file siblings are free functions only.');
+        break;
+      }
+      if (parents.length !== 1) return unavailable('Ambiguous contains ownership; sibling scope was not guessed.');
+      if (depth >= MAX_BOARD_DEPTH) return unavailable(`Sibling ownership proof bounded at ${MAX_BOARD_DEPTH} levels; scope was not guessed.`, true);
+      const parent = parents[0]!;
+      if (seen.has(parent.id)) return unavailable('Cyclic contains ownership; sibling scope was not guessed.');
+      seen.add(parent.id);
+      const node = this.nodes([parent.id]).get(parent.id);
+      if (!node) return unavailable('Missing contains parent; sibling scope was not guessed.');
+      if (parent.reason) originReason = originReason ? Math.min(originReason, parent.reason) : parent.reason;
+      if (siblingTypes.has(node.kind)) { owner = node; break; }
+      if (!siblingContainers.has(node.kind)) return unavailable('Local/nested callable or unsupported containment boundary; no sibling scope was guessed.');
+      cursor = node;
+    }
+    const scope: BoardSiblingScope = owner
+      ? { kind: 'type', id: owner.id, label: owner.qualifiedName || owner.name }
+      : { kind: 'file', label: origin.filePath };
+    const args = [...this.paths()];
+    // Keep every overload ID. Depth is capped in SQL, not by truncating a hub's
+    // fanout, so ordinary large classes can still be paged to their exact total.
+    let walk: string;
+    let candidates: string;
+    if (owner) {
+      args.push(owner.id);
+      walk = `board_walk(id, depth, reason) AS (SELECT ?, 0, ${originReason} UNION
+        SELECT t.id, w.depth+1, ${reasonPriority('w.reason', edgeReason(filters))}
+        FROM board_walk w JOIN nodes s ON s.id=w.id JOIN edges e ON e.source=w.id AND e.kind='contains'
+        JOIN nodes t ON t.id=e.target
+        WHERE w.depth<=${MAX_BOARD_DEPTH} AND (w.depth=0 OR s.kind IN ${siblingContainerSql})
+          AND (t.kind IN ('function', 'method') OR t.kind IN ${siblingContainerSql})
+          AND NOT EXISTS (SELECT 1 FROM edges p WHERE p.kind='contains' AND p.target=t.id AND p.source<>e.source))`;
+      args.push(id);
+      candidates = `SELECT n.id, n.file_path, n.start_line, n.start_column, min(w.reason) AS reason
+        FROM board_walk w JOIN nodes n ON n.id=w.id
+        WHERE w.depth BETWEEN 1 AND ${MAX_BOARD_DEPTH} AND n.kind IN ('function', 'method') AND n.id<>? GROUP BY n.id`;
+    } else {
+      args.push(origin.filePath, id);
+      walk = `board_walk(id, ancestor, depth, reason) AS (
+        SELECT n.id, n.id, 0, ${reasonPriority(String(originReason), nodeReason('n', filters))}
+          FROM nodes n WHERE n.file_path=? AND n.kind='function' AND n.id<>? UNION
+        SELECT w.id, s.id, w.depth+1, ${reasonPriority('w.reason', edgeReason(filters))}
+        FROM board_walk w JOIN edges e ON e.target=w.ancestor AND e.kind='contains'
+        JOIN nodes s ON s.id=e.source JOIN nodes t ON t.id=e.target
+        WHERE w.depth<=${MAX_BOARD_DEPTH} AND s.kind IN ${siblingContainerSql}
+          AND NOT EXISTS (SELECT 1 FROM edges p WHERE p.kind='contains' AND p.target=t.id AND p.source<>e.source))`;
+      candidates = `SELECT n.id, n.file_path, n.start_line, n.start_column, min(w.reason) AS reason
+        FROM board_walk w JOIN nodes n ON n.id=w.id WHERE w.depth<=${MAX_BOARD_DEPTH}
+          AND NOT EXISTS (SELECT 1 FROM edges p WHERE p.kind='contains' AND p.target=w.ancestor) GROUP BY n.id`;
+    }
+    const cte = `WITH RECURSIVE ${pathCtes}, ${walk}, board_candidates AS (${candidates})`;
+    const counts = this.counts({ cte, args });
+    const rows = this.db.prepare(`${cte} SELECT id FROM board_candidates WHERE reason=0 ORDER BY ${sourceOrder} LIMIT ? OFFSET ?`)
+      .all(...args, limit, offset) as { id: string }[];
+    const bounded = !!this.db.prepare(`${cte} SELECT 1 FROM board_walk WHERE depth>${MAX_BOARD_DEPTH} LIMIT 1`).get(...args);
+    notes.push('Origin excluded. Only uniquely proven indexed containment is used; ambiguous/missing parents, nested local callables and unrelated types are omitted. Parentless functions count as indexed top-level roots.');
+    if (bounded) notes.push(`Sibling proof bounded at ${MAX_BOARD_DEPTH} containment levels; totals cover only proven candidates within that bound.`);
+    return { ids: rows.map(row => row.id), ...counts, scope, bounded };
   }
 
   /** Direct children, uncapped by the recursive projection scope. */
