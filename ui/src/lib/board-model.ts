@@ -49,9 +49,13 @@ export interface CodeCardData extends Record<string, unknown> {
   symbolId: string; collapsed: boolean; close: (id: string) => void;
   toggle: (id: string) => void; read: (id: string) => void;
 }
+export interface BoardSourceAnchor {
+  id: string; line: number; direction: 'incoming' | 'outgoing';
+}
 export interface SourceCardData extends CodeCardData {
   symbol: BoardSymbol; follow?: (target: BoardSymbol, line?: number, event?: MouseEvent) => void; highlight?: number | null;
   filters?: BoardFilters;
+  sourceAnchors?: readonly BoardSourceAnchor[];
   resize?: (id: string, widthDelta: number, heightDelta: number) => void;
   siblings?: (symbolId: string, event?: MouseEvent) => Promise<void>;
   siblingsBusy?: boolean;
@@ -61,6 +65,8 @@ export interface SourceCardData extends CodeCardData {
 export interface BoardRelation {
   id: string; source: string; target: string; sourceHandle: string; targetHandle: string;
   kind: string; evidence: BoardEvidence[]; via?: string;
+  /** Verified indexed lines for the independent source-card layer only. */
+  sourceLine?: number; targetLine?: number;
 }
 export interface ConnectionRow {
   target: BoardSymbol; evidence: BoardEvidence[]; status: 'absent' | 'hidden' | 'visible'; representative: string;
@@ -374,10 +380,13 @@ export function mergeBoardFacts(current: readonly BoardSymbol[], incoming: reado
 }
 
 /** One linear grouping pass instead of filtering all edges again for every lane. */
-export function edgeLaneMap(edges: readonly Pick<BoardRelation, 'id' | 'source' | 'target'>[]): Map<string, number> {
+export function edgeLaneMap(
+  edges: readonly (Pick<BoardRelation, 'id' | 'source' | 'target'> & Partial<Pick<BoardRelation, 'sourceHandle' | 'targetHandle'>>)[],
+  byHandles = false,
+): Map<string, number> {
   const pairs = new Map<string, typeof edges[number][]>();
   for (const edge of edges) {
-    const key = JSON.stringify([edge.source, edge.target]);
+    const key = JSON.stringify(byHandles ? [edge.source, edge.sourceHandle, edge.target, edge.targetHandle] : [edge.source, edge.target]);
     const group = pairs.get(key) ?? []; group.push(edge); pairs.set(key, group);
   }
   const lanes = new Map<string, number>();

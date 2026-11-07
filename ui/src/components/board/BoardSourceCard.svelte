@@ -13,6 +13,7 @@
     boardSourceEvidenceTitle, boardEvidenceUncertain, verifiedBoardSourceSymbol, boardSourceForIdentity,
     boardSourceTarget, boardSourceApplyEvidence, boardSourcePageProgress, boardSourceLoadReferences, boardSourceMergeExclusions, type BoardSourceTarget,
   } from '../../lib/board-source-model';
+  import { boardSourceAnchorPositions, type BoardSourceAnchorPosition } from '../../lib/board-source-anchors';
   import { live } from '../../lib/live.svelte';
   import { fileHref, symbolHref, navigate } from '../../lib/navigation';
   import SourceBlock from '../symbol/SourceBlock.svelte';
@@ -55,6 +56,20 @@
   let pageFrom = $state<number | null>(null);
   let localHighlight = $state<number | null>(null);
   let sourceEl = $state<HTMLDivElement | null>(null);
+  let cardEl = $state<HTMLElement | null>(null);
+  const lineAnchors = $derived(data.sourceAnchors);
+  let anchorPositions = $state<BoardSourceAnchorPosition[]>([]);
+  const offscreenGroups = $derived.by(() => {
+    const groups = new Map<string, { direction: 'incoming' | 'outgoing'; offscreen: 'above' | 'below'; y: number; lines: number[] }>();
+    for (const anchor of anchorPositions) {
+      if (!anchor.offscreen) continue;
+      const key = `${anchor.direction}:${anchor.offscreen}`;
+      const group = groups.get(key) ?? { direction: anchor.direction, offscreen: anchor.offscreen, y: anchor.y, lines: [] };
+      if (!group.lines.includes(anchor.line)) group.lines.push(anchor.line);
+      groups.set(key, group);
+    }
+    return [...groups.values()].map((group) => ({ ...group, lines: group.lines.sort((a, b) => a - b) }));
+  });
   let highlight = $derived(current ? null : (localHighlight ?? requestedLine ?? null));
 
   $effect(() => {
@@ -231,13 +246,62 @@
   }
   function focusSite(edge: BoardEvidence): void {
     if (!canFocus(edge)) return;
-    localHighlight = edge.line!; pageFrom = null;
+    focusSourceLine(edge.line!);
+  }
+  function focusSourceLine(line: number): void {
+    localHighlight = line; pageFrom = null;
+    // The same highlighted line may have been scrolled away since the last
+    // activation. Do not depend on a changed highlight to reveal it again.
+    void tick().then(() => {
+      if (!indexed || localHighlight !== line || !sourceEl) return;
+      const row = sourceEl.querySelector<HTMLElement>(`[data-line="${line}"]`);
+      if (row) sourceEl.scrollTop = Math.max(0, row.offsetTop - 40);
+    });
   }
   function evidenceOrigin(edge: BoardEvidence): BoardSymbol | undefined {
     const origin = byId.get(edge.source);
     return origin && edge.file === origin.file && edge.line != null && edge.line >= origin.line && edge.line <= (origin.endLine ?? origin.line) ? origin : undefined;
   }
   function goPage(from: number | null): void { if (from !== null) pageFrom = from; }
+
+  // Coordinates come from the rendered source rows and their actual gutter,
+  // not a guessed line height. Normalize screen rectangles by the canvas scale.
+  // Scrolling/resizing only updates handles; it never requests source or graph.
+  $effect(() => {
+    const anchors = lineAnchors; const el = sourceEl; const card = cardEl;
+    const value = source; const trusted = indexed; const collapsed = isCollapsed;
+    if (!anchors?.length || !el || !card || !trusted || collapsed || !value?.lines?.length) { anchorPositions = []; return; }
+    let active = true; let frame: number | null = null;
+    function measure() {
+      frame = null;
+      if (!active || !el || !card || !value?.lines) return;
+      const box = card.getBoundingClientRect(); const viewport = el.getBoundingClientRect();
+      const sx = card.offsetWidth > 0 && box.width > 0 ? box.width / card.offsetWidth : 1;
+      const sy = card.offsetHeight > 0 && box.height > 0 ? box.height / card.offsetHeight : 1;
+      const rows = new Map<number, { y: number }>();
+      for (const row of el.querySelectorAll<HTMLElement>('.code .ln[data-line]')) {
+        const dot = row.querySelector<HTMLElement>('.port i');
+        const rect = (dot ?? row).getBoundingClientRect();
+        rows.set(Number(row.dataset.line), { y: (rect.top + rect.height / 2 - box.top) / sy });
+      }
+      const gutter = el.querySelector<HTMLElement>('.code .port')?.getBoundingClientRect();
+      const from = value.from ?? verified?.line ?? 1;
+      const next = boardSourceAnchorPositions(anchors ?? [], { top: (viewport.top - box.top) / sy,
+        bottom: (viewport.bottom - box.top) / sy, gutterX: gutter ? (gutter.right - box.left) / sx - 7 : card.offsetWidth - 20,
+        from, to: from + value.lines.length - 1, rows });
+      if (JSON.stringify(next) === JSON.stringify(untrack(() => anchorPositions))) return;
+      anchorPositions = next;
+      void tick().then(() => { if (active) updateNodeInternals(id); });
+    }
+    function schedule() { if (active && frame === null) frame = requestAnimationFrame(measure); }
+    el.addEventListener('scroll', schedule, { passive: true });
+    const observer = new ResizeObserver(schedule);
+    observer.observe(el); observer.observe(card);
+    const code = el.querySelector('.code'); if (code) observer.observe(code);
+    void document.fonts?.ready.then(schedule);
+    schedule();
+    return () => { active = false; if (frame !== null) cancelAnimationFrame(frame); observer.disconnect(); el.removeEventListener('scroll', schedule); };
+  });
 
   // Scroll the card only, not the canvas or the document containing it.
   $effect(() => {
@@ -252,9 +316,23 @@
 </script>
 
 <NodeResizer minWidth={380} minHeight={190} maxWidth={4096} maxHeight={4096} isVisible={selected && !data.collapsed} />
-<article class="source-card" class:chosen={selected} data-code-card={data.symbolId}>
-  <Handle type="source" id="source-out" position={Position.Right} isConnectable={false} tabindex={-1} aria-hidden="true" />
-  <Handle type="target" id="source-in" position={Position.Left} isConnectable={false} tabindex={-1} aria-hidden="true" />
+<article class="source-card" class:chosen={selected} data-code-card={data.symbolId} bind:this={cardEl}>
+  {#each anchorPositions as anchor (anchor.id)}
+    <Handle type={anchor.direction === 'outgoing' ? 'source' : 'target'} id={anchor.id} position={anchor.direction === 'outgoing' ? Position.Right : Position.Left}
+      isConnectable={false} tabindex={-1} aria-hidden="true" class="source-line-port"
+      style={`left:${anchor.x}px;right:auto;top:${anchor.y}px;transform:translate(-50%,-50%);pointer-events:none`}
+      data-source-anchor={anchor.id} data-source-line={anchor.line} data-source-direction={anchor.direction} data-offscreen={anchor.offscreen ?? undefined} />
+  {/each}
+  {#each offscreenGroups as group (`${group.direction}:${group.offscreen}`)}
+    {@const nearest = (group.offscreen === 'above' ? group.lines[group.lines.length - 1] : group.lines[0])!}
+    <button type="button" class="offscreen-lines nodrag nopan nokey" class:incoming={group.direction === 'incoming'} class:below={group.offscreen === 'below'}
+      style={`top:${group.y}px`} data-offscreen-lines={group.lines.join(',')}
+      title={`${group.direction} connections ${group.offscreen}: lines ${group.lines.join(', ')}. Show line ${nearest}.`}
+      aria-label={`Show ${group.direction} connection line ${nearest} ${group.offscreen}`}
+      onclick={(event) => { event.stopPropagation(); focusSourceLine(nearest); }}>
+      {group.offscreen === 'above' ? '↑' : '↓'} L{nearest}{group.lines.length > 1 ? ` +${group.lines.length - 1}` : ''}
+    </button>
+  {/each}
   <span class="keyboard-help" id={`${id}-move-help`}>Press Enter to select, then use arrow keys to move this source card.</span>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex (SvelteFlow owns Enter selection and arrow-key movement on this focusable move handle.) -->
   <header class="board-drag-handle" role="group" tabindex="0" aria-label={`Source card ${data.symbol.qualifiedName}`} aria-describedby={`${id}-move-help`}><KindGlyph kind={data.symbol.kind} /><strong title={data.symbol.qualifiedName}>{data.symbol.qualifiedName}</strong>
@@ -270,7 +348,7 @@
   </header>
   <div class="location nodrag nopan nokey">{data.symbol.kind} · {data.symbol.file}:{verified?.line ?? data.symbol.line}{#if owner} · in {owner.qualifiedName}{/if}</div>
   {#if !data.collapsed}
-    <div class="source nodrag nopan nowheel nokey" bind:this={sourceEl}>
+    <div class="source nodrag nopan nowheel nokey" data-source-body bind:this={sourceEl}>
       {#if verifying || loading}<p role="status">Loading source…</p>{:else if identityError || error}<p role="alert">{identityError || error}</p>{/if}
       {#if source?.drift}<DriftBanner file={data.symbol.file}>indexed symbol ranges may be stale; no line-anchored graph markings are shown here. {#if !current}<button type="button" onclick={() => { current = true; pageFrom = null; }}>Read current file</button>{/if}</DriftBanner>{/if}
       {#if source?.lines}
@@ -334,8 +412,13 @@
 </article>
 
 <style>
-  .source-card { width: 100%; height: 100%; background: var(--paper); border: 1px solid var(--ink-3); display: flex; flex-direction: column; overflow: hidden; color: var(--ink); }
+  .source-card { position: relative; width: 100%; height: 100%; background: var(--paper); border: 1px solid var(--ink-3); display: flex; flex-direction: column; overflow: hidden; color: var(--ink); }
   .chosen { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .source-card :global(.source-line-port) { width: 6px; height: 6px; min-width: 6px; min-height: 6px; border: 1px solid var(--accent); background: var(--paper); z-index: 4; }
+  .source-card :global(.source-line-port[data-source-direction='outgoing']) { border: 0; background: transparent; }
+  .offscreen-lines { position: absolute; right: 26px; z-index: 5; transform: translateY(2px); padding: 2px 5px; border: 1px solid var(--rule); background: var(--paper); color: var(--accent); font: 10px var(--mono); }
+  .offscreen-lines.incoming { left: 5px; right: auto; }
+  .offscreen-lines.below { transform: translateY(calc(-100% - 2px)); }
   .keyboard-help { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; cursor: grab; background: var(--paper-2); flex-shrink: 0; }
   header strong { font: 500 12px var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }

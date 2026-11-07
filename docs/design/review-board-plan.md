@@ -176,8 +176,18 @@ local values) are eligible; imports, exports, containment and class/file-header
 dependencies are excluded. Endpoints attach to the nearest open, verified source
 card in their proven ownership path, preferring an individual method over its
 open class. Original evidence, uncertainty, synthesis and exact kinds remain
-inspectable. Source-only identities do not seed the symbol diagram. Unverified,
-drifted or current-file bytes do not acquire source-card arrows.
+inspectable. Each distinct indexed site leaves the right-hand source-line dot
+and arrives on the target card's left edge at the original target declaration
+line, including a method inside a whole-class card. Separate call sites are not
+merged merely because their cards match. Scroll/resize measurements use actual
+rendered rows in card-local coordinates, independently of board zoom, and do not
+refetch source or graph. Above/below-viewport endpoints use labelled line-number
+markers; activating a marker reveals that line, including on another source
+page. Several hidden lines can share a counted marker without merging their
+identities. Relationships without an indexed site remain inspectable in links,
+not attached to guessed lines. Source-only identities do not seed the symbol
+diagram. Unverified, drifted or current-file bytes do not acquire source-card
+arrows.
 
 Class and function source cards load reference/evidence pages automatically in
 sequential batches of at most 64 requests (32 targets or 200 evidence items per
