@@ -48,7 +48,7 @@ import { GraphSession } from './session';
 import { ApiError, badRequest, fail, notFound, ok, readJsonBody } from './respond';
 import { buildStats } from './stats';
 import { buildSearch } from './search';
-import { buildBoard, buildBoardSearch, buildBoardConnections, buildBoardEvidence, buildBoardGroups, buildBoardMembers,
+import { buildBoard, buildBoardSearch, buildBoardSiblingSources, buildBoardConnections, buildBoardEvidence, buildBoardGroups, buildBoardMembers,
   parseBoardProjectionBody, MAX_BOARD_PROJECTION_BODY_BYTES } from './board';
 import { buildNode } from './node';
 import { buildSource } from './source';
@@ -185,6 +185,7 @@ const API_INDEX = {
     { path: '/api/board/search', description: 'All-kind Board symbol, folder and namespace enumeration.', params: ['q', 'kind', 'path', 'namespace', 'offset', 'limit', 'tests', 'generated', 'uncertain'] },
     { path: '/api/board/groups', description: 'Indexed folder/namespace groups with exact selection preview counts.', params: ['type', 'q', 'offset', 'limit', 'tests', 'generated', 'uncertain'] },
     { path: '/api/board/members', description: 'Paged direct contains children in source order, beyond the projection scope cap.', params: ['id', 'offset', 'limit', 'tests', 'generated', 'uncertain'] },
+    { path: '/api/board/sibling-sources', description: 'Other callable sources in the nearest proven type, else exact-file top-level free functions. Origin excluded; no graph membership changes.', params: ['id', 'offset', 'limit', 'tests', 'generated', 'uncertain'] },
     { path: '/api/board/connections', description: 'Paged all-kind indexed connections, independent of canvas membership.', params: ['id', 'direction', 'members', 'kind', 'q', 'offset', 'limit', 'tests', 'generated', 'uncertain'] },
     { path: '/api/board/evidence', description: 'Paged original evidence for one connection target.', params: ['id', 'direction', 'members', 'target', 'kind', 'q', 'offset', 'limit', 'tests', 'generated', 'uncertain'] },
     {
@@ -295,6 +296,8 @@ export function createGraphApi(options: GraphApiOptions): GraphApi {
           return ok(res, buildBoard(session.acquire(), ctx.query), ctx.method);
         case '/api/board/search':
           return ok(res, buildBoardSearch(session.acquire(), ctx.query), ctx.method);
+        case '/api/board/sibling-sources':
+          return ok(res, buildBoardSiblingSources(session.acquire(), ctx.query), ctx.method);
         case '/api/board/groups':
           return ok(res, buildBoardGroups(session.acquire(), ctx.query), ctx.method);
         case '/api/board/members':

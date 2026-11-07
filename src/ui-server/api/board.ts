@@ -4,7 +4,7 @@ import { EDGE_KINDS, NODE_KINDS } from '../../types';
 import {
   BoardGraph, MAX_BOARD_SELECTION, MAX_BOARD_RELATIONS, MAX_BOARD_TARGET_EVIDENCE,
   noBoardExclusions, type BoardFact, type BoardRelation, type BoardConnectionFilter,
-  type BoardViewFilters, type BoardExclusions, type BoardExcludedCounts, type BoardGroup,
+  type BoardViewFilters, type BoardExclusions, type BoardExcludedCounts, type BoardGroup, type BoardSiblingScope,
 } from '../../graph/board-projection';
 import { toNodeRef, type WireNodeRef } from './wire';
 import { badRequest, notFound } from './respond';
@@ -45,6 +45,8 @@ export interface BoardSearch {
   notes: string[];
   excluded: BoardExclusions;
 }
+/** Source-only discovery; items exclude the origin and never imply graph membership. */
+export interface BoardSiblingSources extends BoardSearch { scope: BoardSiblingScope }
 export interface BoardGroups extends Omit<BoardSearch, 'items' | 'symbols'> { items: BoardGroup[] }
 export interface BoardMembers extends BoardSearch { symbols: BoardSymbol[] }
 export interface BoardConnections {
@@ -195,6 +197,24 @@ export function buildBoardSearch(cg: CodeGraph, query: URLSearchParams): BoardSe
     if (q) notes.push('Exact literal substring-search totals may scan indexed symbols.');
     return { symbols: symbols(facts.facts), items: page.ids.map(id => toBoardSymbol(facts.facts.get(id)!)), total: page.total,
       nextOffset: next(offset, page.ids.length, page.total), bounded: facts.bounded, notes, excluded: excludedSymbols(page.excluded) };
+  });
+}
+
+export function buildBoardSiblingSources(cg: CodeGraph, query: URLSearchParams): BoardSiblingSources {
+  validate(query, ['id', 'offset', 'limit', ...filterKeys]);
+  const id = text(query, 'id', 2048, true);
+  const viewFilters = filters(query);
+  const { offset, limit } = paging(query, 30);
+  const graph = new BoardGraph(cg);
+  return graph.snapshot(() => {
+    if (!graph.nodes([id]).has(id)) throw notFound('Board sibling origin is not in this index.');
+    const notes: string[] = [];
+    const page = graph.siblingSources(id, offset, limit, viewFilters, notes);
+    const facts = graph.facts(page.ids, notes, viewFilters);
+    exclusions(notes, page.excluded, 'sibling source symbols');
+    return { symbols: symbols(facts.facts), items: page.ids.map(child => toBoardSymbol(facts.facts.get(child)!)),
+      total: page.total, nextOffset: next(offset, page.ids.length, page.total), scope: page.scope,
+      bounded: page.bounded || facts.bounded, notes, excluded: excludedSymbols(page.excluded) };
   });
 }
 

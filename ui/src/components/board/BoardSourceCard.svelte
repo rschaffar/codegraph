@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { tick } from 'svelte';
-  import { NodeResizer, type Node, type NodeProps } from '@xyflow/svelte';
+  import { tick, untrack } from 'svelte';
+  import { Handle, Position, NodeResizer, useUpdateNodeInternals, type Node, type NodeProps } from '@xyflow/svelte';
   import { getGraphAdapter } from '../../lib/adapter';
   import { tokensByLine } from '../../lib/highlight';
   import type { CodeBlock, LineRef } from '../../lib/symbol-model';
@@ -11,6 +11,7 @@
     BOARD_SOURCE_TARGET_PAGE, BOARD_SOURCE_EVIDENCE_PAGE,
     boardSourceRange, boardSourceContinuation, boardSourceRefs, boardSourceWithMembers, boardSourceEvidenceComplete,
     boardSourceEvidenceTitle, boardEvidenceUncertain, verifiedBoardSourceSymbol, boardSourceForIdentity,
+    boardSourceTarget, boardSourceApplyEvidence, boardSourcePageProgress, boardSourceLoadReferences, boardSourceMergeExclusions, type BoardSourceTarget,
   } from '../../lib/board-source-model';
   import { live } from '../../lib/live.svelte';
   import { fileHref, symbolHref, navigate } from '../../lib/navigation';
@@ -18,10 +19,7 @@
   import KindGlyph from '../KindGlyph.svelte';
   import DriftBanner from '../DriftBanner.svelte';
 
-  interface TargetRow {
-    target: BoardSymbol; evidence: BoardEvidence[]; total: number; nextOffset: number | null;
-    open: boolean; loading: boolean; error: string;
-  }
+  interface TargetRow extends BoardSourceTarget { open: boolean }
   interface LinkContext { symbol: BoardSymbol; request: BoardConnectionRequest; controller: AbortController }
 
   let { id, data, selected }: NodeProps<Node<SourceCardData, 'code'>> = $props();
@@ -29,8 +27,23 @@
   // identity, collapse, filter or focus changes may refetch its source/graph.
   const expected = $derived(data.symbol);
   const isCollapsed = $derived(data.collapsed);
+  const updateNodeInternals = useUpdateNodeInternals();
+  $effect(() => {
+    const nodeId = id;
+    void isCollapsed;
+    let cancelled = false;
+    void tick().then(() => { if (!cancelled) updateNodeInternals(nodeId); });
+    return () => { cancelled = true; };
+  });
   const visibility = $derived(data.filters);
   const requestedLine = $derived(data.highlight);
+  const reportSourceState = $derived(data.sourceState);
+  const sourceSymbolId = $derived(data.symbolId);
+  const siblings = $derived(data.siblings);
+  const siblingsBusy = $derived(data.siblingsBusy);
+  const siblingsAvailable = $derived(data.siblingsAvailable);
+  let verifiedIndexTick = $state(-1);
+  let verifiedDiskTick = $state(-1);
   let verified = $state<BoardSymbol | null>(null);
   let identityError = $state('');
   let verifying = $state(false);
@@ -52,7 +65,7 @@
 
   $effect(() => {
     const item = expected; const collapsed = isCollapsed;
-    void live.indexTick; void live.diskTick;
+    verifiedIndexTick = live.indexTick; verifiedDiskTick = live.diskTick;
     const controller = new AbortController();
     verified = null; sourceValue = null; identityError = ''; verifying = !collapsed;
     pageFrom = null; localHighlight = null;
@@ -95,6 +108,7 @@
   let totalTargets = $state<number | null>(null);
   let nextTargets = $state<number | null>(null);
   let linksLoading = $state(false);
+  let autoLoading = $state(false);
   let linksError = $state('');
   let notes = $state<string[]>([]);
   let bounded = $state(false);
@@ -102,19 +116,19 @@
   let context: LinkContext | null = null;
 
   $effect(() => {
-    const item = verified; const collapsed = isCollapsed; const showCurrent = current;
+    const item = verified; const collapsed = isCollapsed; const trusted = indexed;
     const filters = visibility;
     const controller = new AbortController();
     targets = []; symbols = item ? [item] : []; totalTargets = null; nextTargets = null;
-    linksLoading = false; linksError = ''; notes = []; bounded = false; excluded = null; context = null;
-    if (!item || collapsed || showCurrent) return () => controller.abort();
+    linksLoading = false; autoLoading = false; linksError = ''; notes = []; bounded = false; excluded = null; context = null;
+    if (!item || collapsed || !trusted) return () => controller.abort();
     const ctx: LinkContext = { symbol: item, controller, request: {
       id: item.id, direction: 'outgoing', members: boardSourceWithMembers(item),
       tests: filters?.tests ?? false, generated: filters?.generated ?? false, uncertain: filters?.uncertain ?? false,
     } };
     context = ctx;
     if (!getGraphAdapter().boardConnections) linksError = 'This host does not provide indexed Board references.';
-    else void loadTargets(ctx, 0);
+    else untrack(() => { void loadReferences(ctx); });
     return () => controller.abort();
   });
 
@@ -122,8 +136,18 @@
   function mergeSymbols(items: readonly BoardSymbol[]): void {
     symbols = [...new Map([...symbols, ...items].map((item) => [item.id, item])).values()];
   }
-  function mergeNotes(items: readonly string[], isBounded: boolean): void {
-    notes = [...new Set([...notes, ...items])]; bounded ||= isBounded;
+  function mergeNotes(items: readonly string[]): void {
+    notes = [...new Set([...notes, ...items])];
+  }
+  async function loadReferences(ctx: LinkContext): Promise<void> {
+    if (autoLoading || linksLoading || ctx.controller.signal.aborted) return;
+    autoLoading = true; linksError = '';
+    try {
+      await boardSourceLoadReferences({ signal: ctx.controller.signal,
+        state: () => ({ total: totalTargets, nextOffset: nextTargets, error: linksError, targets }),
+        targets: (offset) => loadTargets(ctx, offset), evidence: (targetId) => loadEvidence(targetId),
+      });
+    } finally { if (!ctx.controller.signal.aborted) autoLoading = false; }
   }
   function keepVerifiedScope(ctx: LinkContext, items: readonly BoardSymbol[]): boolean {
     const fresh = verifiedBoardSourceSymbol(ctx.symbol, items);
@@ -140,38 +164,57 @@
       const page = await adapter.boardConnections({ ...ctx.request, offset, limit: BOARD_SOURCE_TARGET_PAGE }, ctx.controller.signal);
       if (ctx.controller.signal.aborted) return;
       if (!keepVerifiedScope(ctx, [page.scope])) return;
+      if ((totalTargets !== null && page.total !== totalTargets) ||
+        !boardSourcePageProgress(offset, page.items.length, page.total, page.nextOffset) ||
+        new Set([...targets.map((row) => row.target.id), ...page.items.map((row) => row.target.id)]).size !== targets.length + page.items.length) {
+        throw new Error('Indexed target pages changed or did not advance. Refresh the board before trusting inline links.');
+      }
       mergeSymbols([...page.symbols, ...page.items.map((row) => row.target)]);
-      const rows = page.items.map((row): TargetRow => ({ ...row, open: false, loading: false, error: '',
-        nextOffset: row.evidence.length < row.total ? row.evidence.length : null }));
-      targets = [...new Map([...targets, ...rows].map((row) => [row.target.id, row])).values()];
-      totalTargets = page.total; nextTargets = page.nextOffset; mergeNotes(page.notes, page.bounded);
-      excluded = page.excluded ?? excluded;
+      const rows = page.items.map((row): TargetRow => ({ ...boardSourceTarget(row, page.bounded, page.excluded), open: false }));
+      targets = [...targets, ...rows];
+      excluded = totalTargets === null ? page.excluded ?? null : boardSourceMergeExclusions(excluded, page.excluded ?? null);
+      totalTargets = page.total; nextTargets = page.nextOffset; mergeNotes(page.notes);
+      // A bounded empty page has no target through which to prove scope bounds.
+      bounded ||= page.bounded && rows.length === 0;
     } catch (cause) { if (!ctx.controller.signal.aborted) linksError = message(cause); }
     finally { if (!ctx.controller.signal.aborted) linksLoading = false; }
   }
   async function loadEvidence(targetId: string): Promise<void> {
     const ctx = context; const row = targets.find((item) => item.target.id === targetId);
     const adapter = getGraphAdapter();
-    if (!ctx || !row || row.loading || row.nextOffset === null || !adapter.boardEvidence) return;
+    if (!ctx || ctx.controller.signal.aborted || !row || row.loading || row.nextOffset === null) return;
+    if (!adapter.boardEvidence) { row.error = 'This host does not provide further evidence pages.'; return; }
     row.loading = true; row.error = '';
     try {
       const page = await adapter.boardEvidence({ ...ctx.request, target: targetId, offset: row.nextOffset, limit: BOARD_SOURCE_EVIDENCE_PAGE }, ctx.controller.signal);
       if (ctx.controller.signal.aborted || !keepVerifiedScope(ctx, page.symbols)) return;
-      mergeSymbols(page.symbols); mergeNotes(page.notes, page.bounded);
-      row.evidence = [...new Map([...row.evidence, ...page.items].map((edge) => [edge.id, edge])).values()];
-      row.total = page.total; row.nextOffset = page.nextOffset;
+      boardSourceApplyEvidence(row, page);
+      mergeSymbols(page.symbols); mergeNotes(page.notes);
     } catch (cause) { if (!ctx.controller.signal.aborted) row.error = message(cause); }
     finally { if (!ctx.controller.signal.aborted) row.loading = false; }
   }
 
-  const indexed = $derived(!!verified && !current && !!source?.lines && !source.drift && source.showing === 'indexed');
+  const indexed = $derived(!!verified && !isCollapsed && !verifying && !loading && !identityError && !error &&
+    !current && !!source?.lines && !source.drift && source.showing === 'indexed' &&
+    verifiedIndexTick === live.indexTick && verifiedDiskTick === live.diskTick);
   const block = $derived<CodeBlock>({ windows: source?.lines ? [{ start: source.from ?? verified?.line ?? 1, lines: source.lines }] : [], gapsAfter: [], tailGap: 0, whole: true });
   const tokens = $derived(tokensByLine(source?.lines ?? [], source?.from ?? verified?.line ?? 1, source?.highlight));
   const byId = $derived(new Map(symbols.map((item) => [item.id, item])));
+  // Ticks belong to verification, not to whatever bytes happen to be cached.
+  $effect(() => {
+    const callback = reportSourceState; const symbolId = sourceSymbolId;
+    const indexTick = verifiedIndexTick; const diskTick = verifiedDiskTick;
+    const trusted = indexed;
+    untrack(() => callback?.(symbolId, { indexed: trusted, indexTick, diskTick }));
+    return () => untrack(() => callback?.(symbolId, { indexed: false, indexTick, diskTick }));
+  });
   const evidenceComplete = $derived(boardSourceEvidenceComplete({ total: totalTargets, nextOffset: nextTargets,
-    bounded, loading: linksLoading, error: linksError, filters: visibility, excluded, targets }));
-  const refs = $derived(indexed ? boardSourceRefs({ expected, verified, source, symbols,
-    evidence: targets.flatMap((row) => row.evidence), evidenceComplete, tokens }) : new Map<number, LineRef[]>());
+    bounded, loading: linksLoading || autoLoading, error: linksError, filters: visibility, excluded, targets }));
+  // Incomplete evidence must not rebuild every rendered source line on each
+  // paging update. Only subscribe to symbols/evidence once completeness holds.
+  const emptyRefs = new Map<number, LineRef[]>();
+  const refs = $derived(indexed && evidenceComplete ? boardSourceRefs({ expected, verified, source, symbols,
+    evidence: targets.flatMap((row) => row.evidence), evidenceComplete: true, tokens }) : emptyRefs);
   const continuation = $derived(verified ? boardSourceContinuation(verified, source, current) : { previous: null, next: null });
   const owner = $derived(data.symbol.ownerId ? byId.get(data.symbol.ownerId) : undefined);
 
@@ -210,10 +253,18 @@
 
 <NodeResizer minWidth={380} minHeight={190} maxWidth={4096} maxHeight={4096} isVisible={selected && !data.collapsed} />
 <article class="source-card" class:chosen={selected} data-code-card={data.symbolId}>
+  <Handle type="source" id="source-out" position={Position.Right} isConnectable={false} tabindex={-1} aria-hidden="true" />
+  <Handle type="target" id="source-in" position={Position.Left} isConnectable={false} tabindex={-1} aria-hidden="true" />
   <span class="keyboard-help" id={`${id}-move-help`}>Press Enter to select, then use arrow keys to move this source card.</span>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex (SvelteFlow owns Enter selection and arrow-key movement on this focusable move handle.) -->
   <header class="board-drag-handle" role="group" tabindex="0" aria-label={`Source card ${data.symbol.qualifiedName}`} aria-describedby={`${id}-move-help`}><KindGlyph kind={data.symbol.kind} /><strong title={data.symbol.qualifiedName}>{data.symbol.qualifiedName}</strong>
-    <div class="actions nodrag nopan nokey"><button type="button" aria-label={`Fit code card ${data.symbol.name}`} onclick={() => data.read(id)}>Read ↗</button>
+    <div class="actions nodrag nopan nokey">
+      {#if data.symbol.kind === 'function' || data.symbol.kind === 'method'}
+        <button type="button" aria-label={`Open sibling sources for ${data.symbol.name}`} disabled={!siblings || !siblingsAvailable || siblingsBusy}
+          title={siblingsBusy ? 'Loading sibling sources…' : !siblings || !siblingsAvailable ? 'This host does not provide sibling sources.' : 'Open source cards for siblings in the indexed owner scope'}
+          onclick={(event) => { void siblings?.(data.symbolId, event); }}>{siblingsBusy ? 'Opening siblings…' : 'Open sibling sources'}</button>
+      {/if}
+      <button type="button" aria-label={`Fit code card ${data.symbol.name}`} onclick={() => data.read(id)}>Read ↗</button>
       <button type="button" aria-label={`${data.collapsed ? 'Expand' : 'Collapse'} code card ${data.symbol.name}`} onclick={() => data.toggle(id)}>{data.collapsed ? '▾' : '▴'}</button>
       <button type="button" aria-label={`Close code card ${data.symbol.name}`} onclick={() => data.close(id)}>×</button></div>
   </header>
@@ -236,11 +287,11 @@
         <details class="links">
           <summary>Indexed outgoing links · {targets.length}{totalTargets === null ? '' : ` of ${totalTargets}`} targets</summary>
           <p>{boardSourceWithMembers(verified!) ? 'Symbol and contained members' : 'This symbol only'} · reading links does not add or restore board symbols.</p>
-          {#if !evidenceComplete}<p class="dim">Inline target links are withheld until all unfiltered reference/evidence pages are proven complete and uncapped. Follow an explicit target below instead.</p>{/if}
+          {#if !evidenceComplete}<p class="dim">Inline target links wait for complete, unfiltered evidence with no hard scope bounds. References load automatically in bounded batches; continue below for larger scopes, or follow an explicit target.</p>{/if}
           <p class="dim">Tests {data.filters?.tests ? 'included' : 'excluded'} · generated {data.filters?.generated ? 'included' : 'excluded'} · uncertain {data.filters?.uncertain ? 'included' : 'excluded'}</p>
           {#if excluded}<p class="dim">Filtered relationships · tests {excluded.relations.tests} · generated {excluded.relations.generated} · uncertain {excluded.relations.uncertain} (disjoint reasons)</p>{/if}
-          {#if linksLoading}<p role="status">Loading indexed references…</p>{/if}
-          {#if linksError}<p role="alert">{linksError}</p><button type="button" disabled={linksLoading} onclick={() => { if (context) void loadTargets(context, nextTargets ?? 0); }}>Retry references</button>{/if}
+          {#if linksLoading || autoLoading}<p role="status">Loading indexed references…</p>{/if}
+          {#if linksError}<p role="alert">{linksError}</p><button type="button" disabled={linksLoading || autoLoading} onclick={() => { if (context) void loadReferences(context); }}>Retry references</button>{/if}
           {#each targets as row (row.target.id)}
             <div class="target">
               <button type="button" class="target-link" title={`${row.target.kind} · ${row.target.qualifiedName} — ${row.target.file}:${row.target.line}`} onclick={(event) => follow(row.target, undefined, event)}>{row.target.qualifiedName} ↗</button>
@@ -262,14 +313,14 @@
                 </ul>
                 {#if row.error}<p role="alert">{row.error}</p>{/if}
                 {#if row.nextOffset !== null}
-                  {#if getGraphAdapter().boardEvidence}<button type="button" disabled={row.loading} onclick={() => void loadEvidence(row.target.id)}>{row.loading ? 'Loading evidence…' : 'Load more evidence'} ({row.evidence.length} of {row.total})</button>{:else}<span class="dim">This host does not provide further evidence pages.</span>{/if}
+                  {#if getGraphAdapter().boardEvidence}<button type="button" disabled={row.loading || autoLoading} onclick={() => void loadEvidence(row.target.id)}>{row.loading ? 'Loading evidence…' : 'Load more evidence'} ({row.evidence.length} of {row.total})</button>{:else}<span class="dim">This host does not provide further evidence pages.</span>{/if}
                 {/if}
               {/if}
             </div>
           {/each}
           {#if totalTargets === 0}<p>No indexed outgoing targets match these filters.</p>{/if}
-          {#if nextTargets !== null}<button type="button" disabled={linksLoading} onclick={() => { if (context && nextTargets !== null) void loadTargets(context, nextTargets); }}>Load more targets ({targets.length} of {totalTargets})</button>{/if}
-          {#if bounded}<p class="dim">Indexed scope or evidence is bounded; totals and links describe the returned scope.</p>{/if}
+          {#if nextTargets !== null || targets.some((row) => row.nextOffset !== null && !row.error)}<button type="button" disabled={linksLoading || autoLoading} onclick={() => { if (context) void loadReferences(context); }}>Continue loading references ({targets.length} of {totalTargets ?? '?' } targets)</button>{/if}
+          {#if bounded || targets.some((row) => row.bounded)}<p class="dim">Indexed scope/identity or an unverified evidence preview is bounded; inline links remain withheld until hard bounds can be ruled out.</p>{/if}
           {#each notes as note (note)}<p class="dim">{note}</p>{/each}
         </details>
       {/if}

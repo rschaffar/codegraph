@@ -162,6 +162,34 @@ raises it without moving it or the viewport, even when it is off-screen. Selecti
 a card highlights the related graph symbol/evidence on the diagram. A fit/read action makes a card readable after
 zooming out.
 
+**Open sibling sources** on callable symbol/member and source cards opens the other
+methods of the nearest proven indexed type, or other top-level free functions in
+the exact same file when there is no type owner. Nested local functions and
+methods of unrelated types are not file siblings. Discovery respects the Board
+filters, does not pin symbols, reuses existing source cards and preserves their
+positions and the viewport. The entire batch must fit the existing 32-source-card
+and 128-retained-identity limits; otherwise no partial batch is opened.
+
+Source cards have their own typed relationship layer, never connections to symbol
+cards. Only relationships originating in a callable (including its parameters or
+local values) are eligible; imports, exports, containment and class/file-header
+dependencies are excluded. Endpoints attach to the nearest open, verified source
+card in their proven ownership path, preferring an individual method over its
+open class. Original evidence, uncertainty, synthesis and exact kinds remain
+inspectable. Source-only identities do not seed the symbol diagram. Unverified,
+drifted or current-file bytes do not acquire source-card arrows.
+
+Class and function source cards load reference/evidence pages automatically in
+sequential batches of at most 64 requests (32 targets or 200 evidence items per
+request). A recoverable evidence-preview cap is rechecked through the full
+evidence endpoint rather than permanently disabling links. Larger scopes have an
+explicit continuation; hard containment bounds, unknown exclusions, ambiguous
+token targets and changed source still withhold inline precision. The focused
+`scripts/check-board-source-browser.mjs` exercises whole-class links across target
+pages, class/file siblings and the independent arrow layers against a throwaway
+real index; `CODEGRAPH_BOARD_EXECUTABLE` can select an installed Nix viewer and
+`CODEGRAPH_BOARD_ARTIFACT_ROOT` keeps evidence in a chosen task directory.
+
 Fetch source on demand through the existing source API and reuse syntax
 classification and highlighting. Show current disk source with the existing
 drift treatment; do not keep obsolete line-anchored edges attached to changed

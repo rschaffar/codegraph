@@ -51,6 +51,11 @@ function mocks() {
     boardSearch: vi.fn(async () => ({ items: clone(facts), symbols: clone(facts), total: facts.length, nextOffset: null, bounded: false })),
     boardConnections: vi.fn(async (request: BoardConnectionRequest) => connections(request)),
     boardEvidence: vi.fn(async (_request: BoardConnectionRequest) => ({ symbols: clone(facts), items: [{ ...edge, id: 'reference-two' }], total: 2, nextOffset: null, bounded: false, notes: [] })),
+    boardSiblingSources: vi.fn(async (request: { id: string }) => {
+      const origin = facts.find((item) => item.id === request.id)!;
+      const items = facts.filter((item) => item.id !== origin.id && item.kind === origin.kind && item.ownerId === origin.ownerId && item.file === origin.file);
+      return { symbols: clone(facts), items: clone(items), total: items.length, nextOffset: null, bounded: false, notes: [], excluded: clone(noExclusions) };
+    }),
     boardMembers: vi.fn(async (request: { id: string }) => {
       const items = facts.filter((item) => item.ownerId === request.id);
       return { symbols: clone(facts), items: clone(items), total: items.length, nextOffset: null, bounded: false, notes: [] };
@@ -280,6 +285,30 @@ describe('Board pointer interactions and placement', () => {
     expect(selectedIds()).toEqual(['code:b']); expect(saved.cards[1].position).toEqual({ x: 260, y: 332.5 }); expect(saved.viewport).toEqual(view);
   });
 
+  it('opens sibling source cards without pinning, moving existing cards, changing the viewport or duplicating cards', async () => {
+    await render(); await open(); await click('Expand Alpha members');
+    await click('Open Alpha.member0 source');
+    const before = await savedState();
+    await click('Open sibling sources for member0');
+    const after = await savedState();
+    expect(after.cards).toHaveLength(children.length);
+    expect(after.symbols.filter((item) => item.included)).toEqual(before.symbols.filter((item) => item.included));
+    expect(after.cards[0].position).toEqual(before.cards[0].position);
+    expect(after.viewport).toEqual(before.viewport);
+    const byKey = new Map(after.symbols.map((item) => [item.key, item.identity.id]));
+    expect(after.cards.map((item) => byKey.get(item.symbolKey)).sort()).toEqual(children.map((item) => item.id).sort());
+    await click('Open sibling sources for member0');
+    expect((await savedState()).cards).toHaveLength(children.length);
+  });
+
+  it('opens no sibling prefix when the full batch exceeds source-card capacity', async () => {
+    await render(); await open(); await click('Expand Alpha members'); await click('Open Alpha.member0 source');
+    calls.boardSiblingSources.mockResolvedValueOnce({ symbols: clone(facts), items: clone(children), total: 40, nextOffset: 12, bounded: false, notes: [], excluded: noExclusions });
+    await click('Open sibling sources for member0');
+    expect(host.textContent).toContain('32-card board limit');
+    expect((await savedState()).cards).toHaveLength(1);
+  });
+
   it('centers menu and keyboard openings in the current view rather than using their screen click', async () => {
     await render(); await open(); await click('+ Add symbols');
     const row = [...host.querySelectorAll('.library .result')].find((item) => item.querySelector('strong')?.textContent === 'Alpha')!;
@@ -291,6 +320,50 @@ describe('Board pointer interactions and placement', () => {
 });
 
 describe('Board relationship rendering', () => {
+  it('compares unloaded member endpoints discovered only through source-card arrows without pinning them', async () => {
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(286);
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(160);
+    const beta = { ...b, kind: 'class', endLine: 100 };
+    const betaMethod = { ...children[0], id: 'betaMethod', file: b.file, ownerId: b.id, qualifiedName: 'Beta.member0' };
+    facts = [a, beta, ...children, betaMethod];
+    calls.boardSearch.mockResolvedValue({ items: clone([a, beta]), symbols: clone([a, beta]), total: 2, nextOffset: null, bounded: false });
+    calls.board.mockImplementation(async (ids) => ({ ...snapshot(ids), relations: [{ ...edge, source: children[0].id, target: betaMethod.id, kind: 'calls' }] }));
+    await render();
+    for (const name of ['Alpha', 'Beta']) {
+      await click('+ Add symbols');
+      const row = [...host.querySelectorAll('.library .result')].find((item) => item.querySelector('strong')?.textContent === name)!;
+      button('Source', row).click(); await settle();
+    }
+    let arrow: Element | undefined;
+    await vi.waitFor(() => { arrow = [...host.querySelectorAll('.svelte-flow__edge')].find((item) => item.getAttribute('data-id')?.startsWith('source-relation:')); expect(arrow).toBeDefined(); });
+    arrow!.dispatchEvent(new MouseEvent('click', { bubbles: true })); await settle();
+    await click('Compare source ↗');
+    expect(host.querySelectorAll('[data-code-card]')).toHaveLength(4);
+    expect(host.querySelector('[data-code-card="m0"]')).not.toBeNull();
+    expect(host.querySelector('[data-code-card="betaMethod"]')).not.toBeNull();
+    expect(host.querySelectorAll('.svelte-flow__node-symbol')).toHaveLength(0);
+  });
+  it('draws a separate source-only layer, excludes module/header edges, and drops it for drifted bytes', async () => {
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(286);
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(160);
+    const methodEdge = { ...edge, source: children[0].id, kind: 'calls' };
+    const relations = [methodEdge, { ...methodEdge, id: 'import', kind: 'imports' }, edge];
+    calls.board.mockImplementation(async (ids) => ({ ...snapshot(ids), relations }));
+    await render(); boardRequests.enqueue(['a', 'b']); await settle();
+    await click('Open Alpha source'); await click('Open Beta source');
+    const sourceEdges = () => [...host.querySelectorAll<HTMLElement>('.svelte-flow__edge')].filter((item) => item.dataset.id?.startsWith('source-relation:'));
+    await vi.waitFor(() => expect(sourceEdges()).toHaveLength(1));
+    expect(sourceEdges()[0].dataset.id).toContain('["a","b","calls"');
+    expect(host.querySelectorAll('.svelte-flow__node-symbol')).toHaveLength(2);
+    const requests = calls.board.mock.calls.length;
+    await moveCard('code:a'); expect(calls.board.mock.calls).toHaveLength(requests);
+    calls.source.mockResolvedValue({ file: a.file, language: 'typescript', drift: true, showing: 'none', contentHash: 'changed', indexedAt: 1, generated: false, totalLines: 100 });
+    // Reopening after a collapse re-verifies bytes without altering symbol membership.
+    await click('Collapse code card Alpha'); await click('Expand code card Alpha');
+    expect(sourceEdges()).toHaveLength(0);
+    expect(host.querySelectorAll('.svelte-flow__node-symbol')).toHaveLength(2);
+  });
+
   it('matches line/arrow colors per kind and retains them with labels and evidence dashes on selection', async () => {
     // Svelte Flow suppresses edges for zero-size jsdom nodes. Give this test's
     // nodes measurable dimensions without changing the lifecycle-test sandbox.

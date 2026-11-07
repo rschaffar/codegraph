@@ -3,11 +3,92 @@ export { boardEvidenceUncertain };
 import type { Token } from './highlight';
 import { assignRefs, lastSegment, type LineRef } from './symbol-model';
 import type { WireSource } from './wire';
-import type { BoardExclusions, BoardFilters } from './board-wire';
+import type { BoardConnections, BoardEvidencePage, BoardExclusions, BoardFilters } from './board-wire';
 
 export const BOARD_SOURCE_PAGE_LINES = 400;
-export const BOARD_SOURCE_TARGET_PAGE = 8;
-export const BOARD_SOURCE_EVIDENCE_PAGE = 40;
+export const BOARD_SOURCE_TARGET_PAGE = 32;
+export const BOARD_SOURCE_EVIDENCE_PAGE = 200;
+export const BOARD_SOURCE_AUTO_REQUESTS = 64;
+
+export interface BoardSourceTarget {
+  target: BoardSymbol; evidence: BoardEvidence[]; total: number; nextOffset: number | null;
+  bounded: boolean; restart: boolean; loading: boolean; error: string;
+  excluded: BoardExclusions | null;
+}
+
+/** Connections combines hard bounds with recoverable evidence-preview caps.
+ * A bounded preview is NOT proof either way: replace it using /board/evidence,
+ * whose bounded flag describes only scope/identity bounds (not preview paging).
+ * Re-fetch every row on that Connections page, including full-looking previews.
+ */
+export function boardSourceTarget(row: BoardConnections['items'][number], bounded: boolean, excluded?: BoardExclusions): BoardSourceTarget {
+  if (!Number.isSafeInteger(row.total) || row.total < row.evidence.length ||
+    new Set(row.evidence.map((edge) => edge.id)).size !== row.evidence.length ||
+    row.evidence.some((edge) => edge.target !== row.target.id)) {
+    throw new Error('Indexed evidence preview is inconsistent. Refresh the board before trusting inline links.');
+  }
+  return { ...row, bounded, restart: bounded, loading: false, error: '', excluded: excluded ?? null,
+    nextOffset: bounded ? 0 : row.evidence.length < row.total ? row.evidence.length : null };
+}
+
+/** Reject changing totals or stalled/overlapping pages rather than certify a prefix. */
+export function boardSourceApplyEvidence(row: BoardSourceTarget, page: BoardEvidencePage): void {
+  const offset = row.nextOffset;
+  if (offset === null || page.total !== row.total || page.items.some((edge) => edge.target !== row.target.id) ||
+    !boardSourcePageProgress(offset, page.items.length, page.total, page.nextOffset)) {
+    throw new Error('Indexed evidence changed or did not advance. Refresh the board before trusting inline links.');
+  }
+  const items = row.restart ? page.items : [...row.evidence, ...page.items];
+  if (new Set(items.map((edge) => edge.id)).size !== items.length) {
+    throw new Error('Indexed evidence pages overlap. Refresh the board before trusting inline links.');
+  }
+  row.evidence = items;
+  row.excluded = boardSourceMergeExclusions(row.excluded, page.excluded ?? null);
+  row.bounded = (!row.restart && row.bounded) || page.bounded;
+  row.restart = false;
+  row.nextOffset = page.nextOffset;
+}
+
+/** Unknown or filtered earlier pages can never be erased by a later zero page. */
+export function boardSourceMergeExclusions(a: BoardExclusions | null, b: BoardExclusions | null): BoardExclusions | null {
+  if (!a || !b) return null;
+  const merge = (x: BoardExclusions['relations'], y: BoardExclusions['relations']) => ({
+    tests: Math.max(x.tests, y.tests), generated: Math.max(x.generated, y.generated), uncertain: Math.max(x.uncertain, y.uncertain),
+  });
+  return { symbols: merge(a.symbols, b.symbols), relations: merge(a.relations, b.relations) };
+}
+
+export function boardSourcePageProgress(offset: number, count: number, total: number, next: number | null): boolean {
+  const end = offset + count;
+  return Number.isSafeInteger(offset) && offset >= 0 && Number.isSafeInteger(count) && count >= 0 &&
+    Number.isSafeInteger(total) && total >= 0 && end <= total &&
+    (next === null ? end === total : count > 0 && next === end && next < total);
+}
+
+/** One sequential, yielding batch per expanded indexed source. No unbounded
+ * Promise.all fan-out; remaining pages stay explicit when the budget is used.
+ * Callers own state and verify identity before accepting each response.
+ */
+export async function boardSourceLoadReferences(input: {
+  signal: AbortSignal;
+  state: () => { total: number | null; nextOffset: number | null; error?: string; targets: readonly BoardSourceTarget[] };
+  targets: (offset: number) => Promise<void>;
+  evidence: (id: string) => Promise<void>;
+}): Promise<void> {
+  for (let requests = 0; requests < BOARD_SOURCE_AUTO_REQUESTS && !input.signal.aborted; requests++) {
+    const state = input.state();
+    if (state.error) return;
+    if (state.total === null || state.nextOffset !== null) await input.targets(state.nextOffset ?? 0);
+    else {
+      const row = state.targets.find((item) => item.nextOffset !== null && !item.loading && !item.error);
+      if (!row) return;
+      await input.evidence(row.target.id);
+    }
+    if (input.signal.aborted) return;
+    // Yield even with an in-memory adapter, so closing/collapsing can cancel.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
+}
 
 /** Line numbers are deliberately not identity: only the freshly verified range is used. */
 export function verifiedBoardSourceSymbol(expected: BoardSymbol, items: readonly BoardSymbol[]): BoardSymbol | null {
@@ -90,7 +171,7 @@ function inScope(id: string, symbol: BoardSymbol, byId: ReadonlyMap<string, Boar
 export function boardSourceEvidenceComplete(input: {
   total: number | null; nextOffset: number | null; bounded: boolean; loading: boolean; error?: string;
   filters?: BoardFilters; excluded?: BoardExclusions | null;
-  targets: readonly { evidence: readonly BoardEvidence[]; total: number; nextOffset: number | null; loading?: boolean; error?: string }[];
+  targets: readonly { evidence: readonly BoardEvidence[]; total: number; nextOffset: number | null; bounded?: boolean; loading?: boolean; error?: string; excluded?: BoardExclusions | null }[];
 }): boolean {
   if (input.loading || input.error || input.bounded || !Number.isSafeInteger(input.total) || input.total! < 0 ||
     input.nextOffset !== null || input.targets.length !== input.total) return false;
@@ -98,7 +179,8 @@ export function boardSourceEvidenceComplete(input: {
   const allIncluded = filters?.tests === true && filters.generated === true && filters.uncertain === true;
   const counts = input.excluded?.relations;
   if (!allIncluded && (!counts || counts.tests !== 0 || counts.generated !== 0 || counts.uncertain !== 0)) return false;
-  return input.targets.every((row) => !row.loading && !row.error && row.nextOffset === null &&
+  return input.targets.every((row) => !row.loading && !row.error && !row.bounded && row.nextOffset === null &&
+    (allIncluded || !('excluded' in row) || (!!row.excluded && Object.values(row.excluded.relations).every((count) => count === 0))) &&
     Number.isSafeInteger(row.total) && row.total >= 0 && row.evidence.length === row.total);
 }
 
@@ -137,7 +219,8 @@ export function boardSourceRefs(input: BoardSourceRefsInput): Map<number, LineRe
       edge.line! < verified.line || edge.line! > verified.endLine! || !inScope(edge.source, verified, byId)) continue;
     const target = byId.get(edge.target);
     const origin = byId.get(edge.source);
-    if (!target || !origin || origin.file !== source.file || target.id.startsWith('missing:')) continue;
+    if (!target || !origin || origin.file !== source.file || target.id.startsWith('missing:') ||
+      edge.line! < origin.line || edge.line! > (origin.endLine ?? origin.line)) continue;
     // A path/route is not an identifier: `file.ts` must never claim an unrelated
     // `ts` token just because lastSegment can find that suffix. Such evidence
     // remains fully readable/followable in the target list.
