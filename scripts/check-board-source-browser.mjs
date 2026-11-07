@@ -23,6 +23,8 @@ const contents = new Map([
   ['group.ts', `${Array.from({ length: 36 }, (_, i) => `function sourceDep${i}() { return ${i}; }`).join('\n')}\nexport class SourceGroup {\n first() { return this.second() + ${Array.from({ length: 36 }, (_, i) => `sourceDep${i}()`).join(' + ')}; }\n second() { return 2; }\n third() { return this.second(); }\n}\nexport class UnrelatedGroup { unrelated() { return 99; } }\n`],
   ['free.ts', 'export function freeA() { return freeB(); }\nexport function freeB() { return 1; }\nexport function freeC() { return freeB(); }\nclass Unrelated { hiddenMethod() { return 2; } }\n'],
   ['free.ts.extra.ts', 'export function wrongFile() { return 0; }\n'],
+  ['scroll-caller.ts', `import { ScrollTarget } from './scroll-target';\nexport function scrollCaller() {\n${Array.from({ length: 60 }, (_, i) => `  const value${i} = ${i};`).join('\n')}\n  return ScrollTarget.run();\n}\n`],
+  ['scroll-target.ts', `export class ScrollTarget {\n${Array.from({ length: 60 }, (_, i) => `  value${i} = ${i};`).join('\n')}\n  static run() { return 1; }\n}\n`],
 ]);
 for (const [file, text] of contents) fs.writeFileSync(path.join(project, file), text);
 const cg = CodeGraph.initSync(project, { config: { include: ['*.ts'], exclude: [] } });
@@ -97,6 +99,56 @@ try {
   assert.deepEqual(evaluate('return [...document.querySelectorAll(".source-card header strong")].map(node=>node.textContent).sort();'), ['freeA', 'freeB', 'freeC']);
   await waitFor('[...document.querySelectorAll(".svelte-flow__edge")].some(edge=>edge.dataset.id.startsWith("source-relation:"))', 'source-only board arrows');
   pass('free-function siblings use the exact file and exclude unrelated methods and filename prefixes');
+
+  click('New'); await search('scrollCaller'); click('Source');
+  await search('ScrollTarget');
+  evaluate('const row=[...document.querySelectorAll(".library .result")].find(row=>row.querySelector("strong")?.textContent==="ScrollTarget");[...row.querySelectorAll("button")].find(button=>button.textContent==="Source").click();return true;');
+  await waitFor('document.querySelectorAll("[data-code-card]").length===2', 'scrolling source pair');
+  const caller = (await api('/api/board/search?q=scrollCaller&kind=function')).items[0];
+  const targetType = (await api('/api/board/search?q=ScrollTarget&kind=class')).items[0];
+  const targetMethod = (await api('/api/board/search?q=run&kind=method')).items.find(item=>item.file==='scroll-target.ts');
+  assert.ok(caller && targetType && targetMethod);
+  const callLine = contents.get('scroll-caller.ts').split('\n').findIndex(line=>line.includes('return ScrollTarget.run')) + 1;
+  const targetLine = targetMethod.line;
+  // Move only the topmost target card through real pointer input so both cards
+  // and their offscreen markers can be operated independently.
+  const header = evaluate(`const rect=document.querySelector('[data-code-card="${targetType.id}"] header').getBoundingClientRect();return{x:rect.left+rect.width/2,y:rect.top+18};`);
+  command('mouse', 'move', String(Math.round(header.x)), String(Math.round(header.y))); command('mouse', 'down');
+  for (let step=1;step<=8;step++) command('mouse', 'move', String(Math.round(header.x+step*80)), String(Math.round(header.y)));
+  command('mouse', 'up'); click('Fit code (2)'); await delay(350);
+  await waitFor(`document.querySelector('[data-code-card="${caller.id}"] [data-source-direction="outgoing"][data-source-line="${callLine}"][data-offscreen="below"]')`, 'offscreen call-line marker');
+  click(`Show outgoing connection line ${callLine} below`);
+  await waitFor(`[...document.querySelectorAll('button')].some(button=>button.getAttribute('aria-label')==='Show incoming connection line ${targetLine} below')`, 'target offscreen marker after source focus');
+  click(`Show incoming connection line ${targetLine} below`);
+  await waitFor(`document.querySelector('[data-code-card="${caller.id}"] [data-source-direction="outgoing"][data-source-line="${callLine}"]:not([data-offscreen])')&&document.querySelector('[data-code-card="${targetType.id}"] [data-source-direction="incoming"][data-source-line="${targetLine}"]:not([data-offscreen])')`, 'precise visible line endpoints');
+  function lineState() {
+    return evaluate(`const caller=document.querySelector('[data-code-card="${caller.id}"]');const target=document.querySelector('[data-code-card="${targetType.id}"]');
+      const out=caller.querySelector('[data-source-direction="outgoing"][data-source-line="${callLine}"]');const input=target.querySelector('[data-source-direction="incoming"][data-source-line="${targetLine}"]');
+      const edge=[...document.querySelectorAll('.svelte-flow__edge')].find(edge=>edge.dataset.id.startsWith('source-relation:')&&edge.dataset.id.includes('"calls"')&&edge.getAttribute('aria-label')==='Edge from code:${caller.id} to code:${targetType.id}');
+      const path=edge?.querySelector('.svelte-flow__edge-path');if(!out||!input||!path)return null;
+      const start=path.getPointAtLength(0).matrixTransform(path.getScreenCTM());const end=path.getPointAtLength(path.getTotalLength()).matrixTransform(path.getScreenCTM());
+      const dot=caller.querySelector('[data-line="${callLine}"] .port i');const row=target.querySelector('[data-line="${targetLine}"]');const a=out.getBoundingClientRect();const b=input.getBoundingClientRect();const d=dot?.getBoundingClientRect();const r=row?.getBoundingClientRect();
+      return{out:a.top+a.height/2,input:b.top+b.height/2,start:start.y,end:end.y,dot:d?d.top+d.height/2:null,row:r?r.top+r.height/2:null,sourceTop:out.style.top,targetTop:input.style.top,offscreenOut:out.dataset.offscreen??null,offscreenIn:input.dataset.offscreen??null,requests:performance.getEntriesByType('resource').filter(item=>/\\/api\\/(source|board)/.test(new URL(item.name).pathname)).length};`);
+  }
+  await waitFor('document.querySelectorAll("[data-code-card] [role=status]").length===0', 'reference batch settled'); await delay(200);
+  const precise = lineState(); assert.ok(precise); assert.ok(precise.dot !== null);
+  assert.ok(Math.abs(precise.start-precise.dot)<2, JSON.stringify(precise));
+  assert.ok(Math.abs(precise.end-precise.row)<2, JSON.stringify(precise));
+  evaluate(`const body=document.querySelector('[data-code-card="${caller.id}"] [data-source-body]');body.scrollTop-=20;return true;`);
+  await delay(150); const sourceScrolled=lineState();
+  assert.notEqual(sourceScrolled.sourceTop,precise.sourceTop);assert.equal(sourceScrolled.targetTop,precise.targetTop);
+  assert.equal(sourceScrolled.requests,precise.requests);assert.ok(Math.abs(sourceScrolled.start-sourceScrolled.dot)<2);
+  evaluate(`const body=document.querySelector('[data-code-card="${targetType.id}"] [data-source-body]');body.scrollTop-=15;return true;`);
+  await delay(150);const targetScrolled=lineState();
+  assert.equal(targetScrolled.sourceTop,sourceScrolled.sourceTop);assert.notEqual(targetScrolled.targetTop,sourceScrolled.targetTop);
+  assert.equal(targetScrolled.requests,precise.requests);assert.ok(Math.abs(targetScrolled.end-targetScrolled.row)<2);
+  evaluate(`document.querySelector('[data-code-card="${caller.id}"] [data-source-body]').scrollTop=0;return true;`);
+  await waitFor(`document.querySelector('[data-code-card="${caller.id}"] [data-source-line="${callLine}"][data-offscreen="below"]')`, 'call scrolled out of view');
+  assert.ok(evaluate(`return [...document.querySelector('[data-code-card="${caller.id}"]').querySelectorAll('[data-offscreen-lines]')].some(node=>node.textContent.includes('L${callLine}'));`));
+  click(`Show outgoing connection line ${callLine} below`); await delay(250);
+  evaluate(`document.querySelector('[data-code-card="${targetType.id}"] details.size summary').click();return true;`);click('Wider');
+  await delay(200);const resized=lineState();assert.ok(Math.abs(resized.start-resized.dot)<2);assert.ok(Math.abs(resized.end-resized.row)<2);
+  pass('actual call dots connect to contained target declaration lines, track each scroll at canvas zoom, label hidden lines and survive resizing without scroll-driven requests');
   assert.equal(command('errors'), '');
   for (const [file, text] of contents) assert.equal(fs.readFileSync(path.join(project, file), 'utf8'), text);
   pass('no browser errors or source-file changes');

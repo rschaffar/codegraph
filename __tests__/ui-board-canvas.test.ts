@@ -320,6 +320,56 @@ describe('Board pointer interactions and placement', () => {
 });
 
 describe('Board relationship rendering', () => {
+  beforeEach(() => {
+    const rect = (x: number, y: number, width: number, height: number) => ({ x, y, width, height, left: x, top: y, right: x + width, bottom: y + height, toJSON() {} });
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
+      const row = this.closest<HTMLElement>('.ln[data-line]');
+      if (row) {
+        const source = row.closest<HTMLElement>('.source')!;
+        const first = Number(source.querySelector<HTMLElement>('[data-line]')?.dataset.line ?? 1);
+        const top = 160 + (Number(row.dataset.line) - first) * 20 - source.scrollTop;
+        if (this.classList.contains('port')) return rect(612, top, 18, 20);
+        return rect(100, top, 530, 20);
+      }
+      if (this.classList.contains('source')) return rect(100, 160, 530, 200);
+      if (this.classList.contains('source-card')) return rect(100, 100, 530, 310);
+      return rect(100, 100, 286, 160);
+    });
+  });
+
+  it('anchors exact call/declaration lines, updates independent scroll positions, and labels hidden lines without refetching', async () => {
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(530);
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(310);
+    facts = [a, { ...b, endLine: 100 }, { ...children[0], endLine: 90 }];
+    calls.board.mockImplementation(async (ids) => ({ ...snapshot(ids), relations: [{ ...edge, source: children[0].id, kind: 'calls', line: 10 }] }));
+    calls.source.mockImplementation(async (request) => ({ file: request.file, language: 'typescript', drift: false, showing: 'indexed',
+      contentHash: 'matching', indexedAt: 1, generated: false, totalLines: 100, from: request.from, to: request.to,
+      lines: Array.from({ length: request.to! - request.from! + 1 }, (_, i) => `// source ${request.from! + i}`) }));
+    await render(); boardRequests.enqueue(['a', 'b']); await settle();
+    await click('Open Alpha source'); await click('Open Beta source');
+    const sourceCard = host.querySelector<HTMLElement>('[data-code-card="a"]')!;
+    const targetCard = host.querySelector<HTMLElement>('[data-code-card="b"]')!;
+    const port = (card: HTMLElement, direction: string) => card.querySelector<HTMLElement>(`[data-source-direction="${direction}"]`)!;
+    await vi.waitFor(() => expect(port(sourceCard, 'outgoing')).not.toBeNull());
+    expect(port(sourceCard, 'outgoing').dataset.sourceLine).toBe('10');
+    expect(port(targetCard, 'incoming').dataset.sourceLine).toBe('2');
+    const before = { source: port(sourceCard, 'outgoing').style.top, target: port(targetCard, 'incoming').style.top,
+      graph: calls.board.mock.calls.length, sourceRequests: calls.source.mock.calls.length, nodes: calls.nodes.mock.calls.length };
+    const sourceBody = sourceCard.querySelector<HTMLElement>('[data-source-body]')!;
+    sourceBody.scrollTop = 40; sourceBody.dispatchEvent(new Event('scroll'));
+    await vi.waitFor(() => expect(port(sourceCard, 'outgoing').style.top).not.toBe(before.source));
+    expect(port(targetCard, 'incoming').style.top).toBe(before.target);
+    const targetBody = targetCard.querySelector<HTMLElement>('[data-source-body]')!;
+    targetBody.scrollTop = 80; targetBody.dispatchEvent(new Event('scroll'));
+    await vi.waitFor(() => expect(port(targetCard, 'incoming').dataset.offscreen).toBe('above'));
+    expect(button('Show incoming connection line 2 above', targetCard)).toBeDefined();
+    expect(calls.board.mock.calls).toHaveLength(before.graph);
+    expect(calls.source.mock.calls).toHaveLength(before.sourceRequests);
+    expect(calls.nodes.mock.calls).toHaveLength(before.nodes);
+    button('Show incoming connection line 2 above', targetCard).click(); await settle();
+    await vi.waitFor(() => expect(port(targetCard, 'incoming')?.dataset.offscreen).toBeUndefined());
+    expect(host.querySelectorAll('.svelte-flow__node-symbol')).toHaveLength(2);
+  });
   it('compares unloaded member endpoints discovered only through source-card arrows without pinning them', async () => {
     vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(286);
     vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(160);
@@ -353,7 +403,7 @@ describe('Board relationship rendering', () => {
     await click('Open Alpha source'); await click('Open Beta source');
     const sourceEdges = () => [...host.querySelectorAll<HTMLElement>('.svelte-flow__edge')].filter((item) => item.dataset.id?.startsWith('source-relation:'));
     await vi.waitFor(() => expect(sourceEdges()).toHaveLength(1));
-    expect(sourceEdges()[0].dataset.id).toContain('["a","b","calls"');
+    expect(sourceEdges()[0].getAttribute('aria-label')).toBe('Edge from code:a to code:b');
     expect(host.querySelectorAll('.svelte-flow__node-symbol')).toHaveLength(2);
     const requests = calls.board.mock.calls.length;
     await moveCard('code:a'); expect(calls.board.mock.calls).toHaveLength(requests);

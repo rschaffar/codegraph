@@ -12,7 +12,7 @@
   import type { BoardSnapshot, BoardDocument, BoardLoaded, BoardList, BoardSearch, BoardConnections, BoardConnectionRequest, BoardGroups } from '../../lib/board-wire';
   import { live } from '../../lib/live.svelte';
   import { boardRequests } from '../../lib/board-requests.svelte';
-  import { boardSourceRelations, boardSiblingSourceCapacity } from '../../lib/board-source-relations';
+  import { boardSourceRelations, boardSourceAnchors, boardSiblingSourceCapacity } from '../../lib/board-source-relations';
 
   const adapter = getGraphAdapter();
   const { fitView, screenToFlowPosition, getIntersectingNodes } = useSvelteFlow();
@@ -114,7 +114,19 @@
       sourceStates[id].indexTick === live.indexTick && sourceStates[id].diskTick === live.diskTick &&
       sourceSnapshotVersion.indexTick === live.indexTick && sourceSnapshotVersion.diskTick === live.diskTick), kind));
   const canvasRelations = $derived([...projection.edges, ...sourceEdges]);
-  const lanes = $derived(edgeLaneMap(canvasRelations));
+  const lanes = $derived(new Map([...edgeLaneMap(projection.edges), ...edgeLaneMap(sourceEdges, true)]));
+  const sourceAnchorGroups = $derived(new Map((JSON.parse(sourceIdsKey) as string[]).map((id) => [id, boardSourceAnchors(sourceEdges, id)])));
+  $effect(() => {
+    const groups = sourceAnchorGroups;
+    untrack(() => {
+      nodes = nodes.map((node) => {
+        if (node.type !== 'code') return node;
+        const anchors = groups.get(node.data.symbolId) ?? [];
+        if (JSON.stringify(node.data.sourceAnchors ?? []) === JSON.stringify(anchors)) return node;
+        return { ...node, data: { ...node.data, sourceAnchors: anchors } };
+      });
+    });
+  });
   const related = $derived(model.sourceSelection(selectedSources, included, hidden));
   const lastHidden = $derived([...hideHistory].reverse().find((id) => hidden.includes(id)));
   const codeCount = $derived(nodes.filter((node) => node.type === 'code').length);
@@ -510,7 +522,8 @@
     adapter.board(ids.filter((id) => !id.startsWith('missing:')), controller.signal, visibility).then((value) => {
       if (controller.signal.aborted) return;
       sourceSnapshot = value; sourceSnapshotVersion = version;
-      sourceNotes = value.bounded ? ['Source-card relationships are bounded; shown arrows are a partial indexed view.', ...value.notes] : value.notes;
+      sourceNotes = ['Source arrows require indexed source locations and land at target declarations. Relationships without a trusted line remain available in Indexed outgoing links.',
+        ...(value.bounded ? ['Source-card relationships are bounded; shown arrows are a partial indexed view.'] : []), ...value.notes];
     }).catch((cause) => { if (!controller.signal.aborted) sourceError = cause instanceof Error ? cause.message : String(cause); });
     return () => controller.abort();
   });

@@ -19,6 +19,8 @@ These describe `codegraph ui` and its screens. They were taken out of `## [Unrel
 
 - Review Board draws typed connections between open source cards for calls, references and parameter or return types, separately from symbol-card connections and without import-level arrows.
 
+- Source-card connections follow the actual source and target declaration lines while scrolling, with labelled markers for connected lines outside the visible area.
+
 - Review Board supports right-drag panning, Shift-click and rectangle multi-selection, group movement, and opening cards where you click without moving your view.
 
 - Review Board’s selection rectangle is an unfilled outline that disappears on release while keeping enclosed or touched cards selected.
