@@ -15,6 +15,8 @@ These describe `codegraph ui` and its screens. They were taken out of `## [Unrel
 
 ## New Features
 
+- Review Board source cards can grow taller than 4,096 pixels, so you can see more code without the previous height ceiling.
+
 - Review Board no longer stops at 32 source cards, so you can compare more sources within the board’s shared identity and file-size limits.
 
 - Review Board has movable, resizable plain-text comment cards for personal notes that stay with saved and exported boards without changing code or indexed relationships.

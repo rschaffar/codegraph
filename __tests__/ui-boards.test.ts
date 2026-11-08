@@ -160,6 +160,23 @@ describe('board import validation without storage', () => {
     expect(fs.existsSync(path.join(root, BOARDS_RELATIVE_DIR))).toBe(false);
     expect(parseBoardDocument({ ...doc, symbols: [], cards: [] }).symbols).toEqual([]);
   });
+  it.each([false, true])('round-trips tall source cards through validation, storage and resolution (collapsed=%s)', (collapsed) => {
+    for (const height of [60, 4097, 10_000, 1_000_001]) {
+      const doc = document(); Object.assign(doc.cards[0]!, { height, collapsed });
+      expect(parseBoardDocument(JSON.parse(JSON.stringify(doc)))).toEqual(doc);
+      const saved = save(`Height ${height}`, doc);
+      const restored = readStoredBoard(root, saved.id)!.document;
+      expect(restored).toEqual(doc);
+      expect(resolveBoard(cg, restored).board).toEqual(doc);
+    }
+  });
+  it('still rejects non-finite, nonnumeric and below-minimum source-card heights', () => {
+    for (const height of [NaN, Infinity, -Infinity, undefined, null, '8192', true, [], {}, -1, 0, 59]) {
+      const doc = document(); (doc.cards[0] as any).height = height;
+      expect(() => parseBoardDocument(doc)).toThrow(/finite and at least 60/);
+      expect(() => save('Invalid source height', doc)).toThrow(/finite and at least 60/);
+    }
+  });
   it('preserves the empty all-kinds filter through validation, save/load and resolution', () => {
     const doc = document();
     doc.filters.kind = '';

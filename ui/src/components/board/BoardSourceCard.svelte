@@ -349,7 +349,7 @@
   </span>
 {/snippet}
 
-<NodeResizer minWidth={380} minHeight={190} maxWidth={4096} maxHeight={4096} isVisible={selected && !data.collapsed} />
+<NodeResizer minWidth={380} minHeight={190} maxWidth={4096} isVisible={selected && !data.collapsed} />
 <article class="source-card" class:chosen={selected} data-code-card={data.symbolId} bind:this={cardEl}>
   <Handle type="target" id="source-owner" position={Position.Left} isConnectable={false} tabindex={-1} aria-hidden="true" style={`top:20px;opacity:${data.sourceOwners?.length ? 1 : 0};pointer-events:none`} />
   {#each anchorPositions as anchor (anchor.id)}
