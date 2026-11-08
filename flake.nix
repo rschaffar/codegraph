@@ -28,6 +28,9 @@
         );
     in
     {
+      # Architecture-independent guidance; consumers install the complete bundle.
+      lib.agentSkills.codegraph = ./skills/codegraph;
+
       packages = forSystems (
         { codegraph, ... }: {
           inherit codegraph;

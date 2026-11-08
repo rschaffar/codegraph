@@ -168,6 +168,24 @@ inputs.codegraph.url = "git+file:///absolute/path/to/codegraph?ref=nix/source-bu
 # inputs.codegraph.packages.${pkgs.stdenv.hostPlatform.system}.codegraph
 ```
 
+### Agent skill export
+
+`lib.agentSkills.codegraph` exposes the architecture-independent `skills/codegraph`
+bundle: general CodeGraph research guidance plus `references/boards.md` for Review
+Board JSON authoring, including plain-text comment cards. Install the whole
+directory so conditional references remain available; the CLI package does not
+install it automatically. For example, in a Home Manager module with `inputs`:
+
+```nix
+home.file.".pi/agent/skills/codegraph".source = inputs.codegraph.lib.agentSkills.codegraph;
+# The same bundle can be installed at .codex/skills/codegraph,
+# .claude/skills/codegraph or .gemini/skills/codegraph.
+```
+
+OpenCode can discover the Claude-global copy; do not install a competing duplicate
+there. Client paths and profile links remain the consumer's responsibility. The
+skill is guidance, not indexing, server-startup, source-edit or write authorization.
+
 The consumer's lock file chooses the exact commit; editing or committing this
 repository does not advance an existing consumer pin. The local repository must
 remain available when updating that input. Flake builds use Git-tracked files,
