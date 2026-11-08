@@ -25,6 +25,12 @@ current local revision there are 23 node kinds and 13 edge kinds.
   reviewer-owned selection, folding, filters, geometry, source cards and viewport;
   those presentation choices are not changes to the indexed graph.
 
+Plain-text comment cards are reviewer-owned annotations, not a `NodeKind` or graph
+member. The optional V1 `comments` array stores a local key, text, position, size
+and stacking order, separately from symbol/source identities. It never participates
+in discovery, projection, containment or graph relationships. See the companion
+plan for interaction, validation bounds and legacy document compatibility.
+
 Version one is single-project: the viewer process's indexed root scopes every
 symbol and saved board. Folders/namespaces are selection or layout conveniences,
 not new engine node kinds. Imported identities cannot select another project;

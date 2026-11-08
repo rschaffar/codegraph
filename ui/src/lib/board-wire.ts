@@ -27,11 +27,16 @@ export interface BoardConnections {
   total: number; nextOffset: number | null; bounded: boolean; notes: string[]; excluded?: BoardExclusions;
 }
 export interface BoardEvidencePage { symbols: BoardSymbol[]; items: BoardEvidence[]; total: number; nextOffset: number | null; bounded: boolean; notes: string[]; excluded?: BoardExclusions }
+export interface BoardComment {
+  key: string; text: string; position: { x: number; y: number }; width: number; height: number; zIndex: number;
+}
 export interface BoardDocument {
   version: 1;
   symbols: Array<{ key: string; identity: { id?: string; qualifiedName: string; kind: string; file: string; signature?: string };
     position: { x: number; y: number }; included: boolean; hidden: boolean; expanded: boolean; memberLimit?: number }>;
   cards: Array<{ key: string; symbolKey: string; position: { x: number; y: number }; width: number; height: number; collapsed: boolean; zIndex: number }>;
+  /** Optional for legacy V1 documents. Plain reviewer text, not indexed source. */
+  comments?: BoardComment[];
   viewport: { x: number; y: number; zoom: number }; filters: { kind: string; showStructure: boolean; includeTests?: boolean; includeGenerated?: boolean; includeUncertain?: boolean };
 }
 export interface BoardList {

@@ -12,6 +12,8 @@ export const MAX_BOARD_SCAN_ENTRIES = 400;
 export const MAX_BOARD_FILE_BYTES = 1024 * 1024;
 export const MAX_BOARD_SYMBOLS = 128;
 export const MAX_BOARD_CARDS = 32;
+export const MAX_BOARD_COMMENTS = 64;
+export const MAX_BOARD_COMMENT_TEXT = 16_384;
 export const MAX_BOARD_NAME = 120;
 const MAX_COORDINATE = 1_000_000;
 
@@ -46,6 +48,8 @@ export interface BoardDocument {
     collapsed: boolean;
     zIndex: number;
   }>;
+  /** Reviewer text, never indexed symbols, source or executable markup. Absent in legacy V1 boards. */
+  comments?: Array<{ key: string; text: string; position: BoardPosition; width: number; height: number; zIndex: number }>;
   viewport: BoardPosition & { zoom: number };
   filters: {
     kind: string;
@@ -136,7 +140,7 @@ function identity(value: unknown): BoardIdentity {
 
 /** Validate imports without storage or graph access; return a fresh, strictly whitelisted document. */
 export function parseBoardDocument(raw: unknown): BoardDocument {
-  const v = object(raw, ['version', 'symbols', 'cards', 'viewport', 'filters']);
+  const v = object(raw, ['version', 'symbols', 'cards', 'comments', 'viewport', 'filters']);
   if (v.version !== 1) throw badRequest('Unsupported board version (expected 1).');
   if (!Array.isArray(v.symbols) || v.symbols.length > MAX_BOARD_SYMBOLS) throw badRequest(`A board holds at most ${MAX_BOARD_SYMBOLS} symbols.`);
   if (!Array.isArray(v.cards) || v.cards.length > MAX_BOARD_CARDS) throw badRequest(`A board holds at most ${MAX_BOARD_CARDS} cards.`);
@@ -175,10 +179,28 @@ export function parseBoardDocument(raw: unknown): BoardDocument {
     if (!Number.isInteger(zIndex)) throw badRequest('Board zIndex must be an integer.');
     return { key, symbolKey, position: position(c.position), width: number(c.width, 100, 4096), height: number(c.height, 60, 4096), collapsed: boolean(c.collapsed), zIndex };
   });
+  if (v.comments !== undefined && (!Array.isArray(v.comments) || v.comments.length > MAX_BOARD_COMMENTS)) {
+    throw badRequest(`A board holds at most ${MAX_BOARD_COMMENTS} comment cards.`);
+  }
+  const commentKeys = new Set<string>();
+  const comments = (v.comments as unknown[] | undefined)?.map((rawComment) => {
+    const c = object(rawComment, ['key', 'text', 'position', 'width', 'height', 'zIndex']);
+    const key = localKey(c.key);
+    if (commentKeys.has(key) || symbolKeys.has(key) || cardKeys.has(key)) throw badRequest('Duplicate board comment key.');
+    commentKeys.add(key);
+    // Empty drafts and whitespace are meaningful; render only as plain text.
+    // eslint-disable-next-line no-control-regex -- allow HT/LF/CR in reviewer text
+    if (typeof c.text !== 'string' || c.text.length > MAX_BOARD_COMMENT_TEXT || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(c.text)) {
+      throw badRequest(`Invalid board comment text (max ${MAX_BOARD_COMMENT_TEXT} characters; only tabs and line breaks may be controls).`);
+    }
+    const zIndex = number(c.zIndex, 0, 1_000_000);
+    if (!Number.isInteger(zIndex)) throw badRequest('Board zIndex must be an integer.');
+    return { key, text: c.text, position: position(c.position), width: number(c.width, 240, 4096), height: number(c.height, 160, 4096), zIndex };
+  });
   const viewport = object(v.viewport, ['x', 'y', 'zoom']);
   const filters = object(v.filters, ['kind', 'showStructure', 'includeTests', 'includeGenerated', 'includeUncertain']);
   const document: BoardDocument = {
-    version: 1, symbols, cards,
+    version: 1, symbols, cards, ...(comments === undefined ? {} : { comments }),
     viewport: { x: number(viewport.x, -MAX_COORDINATE, MAX_COORDINATE), y: number(viewport.y, -MAX_COORDINATE, MAX_COORDINATE), zoom: number(viewport.zoom, 0.05, 8) },
     filters: { kind: filters.kind === '' ? '' : text(filters.kind, 128, 'filter kind'), showStructure: boolean(filters.showStructure),
       ...(filters.includeTests === undefined ? {} : { includeTests: boolean(filters.includeTests) }),

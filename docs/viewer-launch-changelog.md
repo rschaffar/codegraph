@@ -15,6 +15,8 @@ These describe `codegraph ui` and its screens. They were taken out of `## [Unrel
 
 ## New Features
 
+- Review Board has movable, resizable plain-text comment cards for personal notes that stay with saved and exported boards without changing code or indexed relationships.
+
 - Review Board can open the other methods in a class or free functions in a file as source cards with one click, without changing the symbol diagram.
 
 - Review Board draws typed connections between open source cards for calls, references and parameter or return types, separately from symbol-card connections and without import-level arrows.
