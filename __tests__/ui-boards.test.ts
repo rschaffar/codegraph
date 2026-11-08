@@ -274,19 +274,30 @@ describe('board import validation without storage', () => {
       const doc = document();
       doc.symbols[0]!.included = included;
       doc.symbols[0]!.hidden = false;
+      // Keep cardinality valid so this exercises per-target uniqueness, not the
+      // early check that source cards cannot outnumber retained symbols.
+      doc.symbols.push({ ...doc.symbols[0]!, key: 's2', identity: { ...doc.symbols[0]!.identity, qualifiedName: 'other' } });
       doc.cards.push({ ...doc.cards[0]!, key: 'c2' });
       expect(() => parseBoardDocument(doc)).toThrow(/only one source card/);
       expect(() => save('Duplicate cards', doc)).toThrow(/only one source card/);
     }
   });
-  it('still accepts the symbol/card caps with unique identities, keys and card targets', () => {
+  it.each([33, 64, 128])('round-trips %i source cards within the shared identity limit', (count) => {
     const doc = document();
     const symbol = doc.symbols[0]!;
     const card = doc.cards[0]!;
     doc.symbols = Array.from({ length: 128 }, (_, i) => ({ ...symbol, key: `s${i}`, included: false, hidden: false, identity: { ...symbol.identity, qualifiedName: `symbol${i}` } }));
-    doc.cards = Array.from({ length: 32 }, (_, i) => ({ ...card, key: `c${i}`, symbolKey: `s${i}` }));
+    doc.cards = Array.from({ length: count }, (_, i) => ({ ...card, key: `c${i}`, symbolKey: `s${i}` }));
     expect(parseBoardDocument(doc)).toEqual(doc);
-    expect(readStoredBoard(root, save('At caps', doc).id)!.document).toEqual(doc);
+    expect(readStoredBoard(root, save('Many sources', doc).id)!.document).toEqual(doc);
+  });
+  it('still rejects 129 distinct retained identities, including source-only identities', () => {
+    const doc = document(); const symbol = doc.symbols[0]!;
+    doc.symbols = Array.from({ length: 129 }, (_, i) => ({ ...symbol, key: `s${i}`, included: false, hidden: false,
+      identity: { ...symbol.identity, qualifiedName: `symbol${i}` } }));
+    doc.cards[0]!.symbolKey = 's0';
+    expect(() => parseBoardDocument(doc)).toThrow(/at most 128 symbols/);
+    expect(() => save('Too many identities', doc)).toThrow(/at most 128 symbols/);
   });
   it('rejects unknown properties at every level rather than retaining source, edges or credentials', () => {
     const mutations = [
@@ -326,8 +337,7 @@ describe('board import validation without storage', () => {
       (d: any) => { d.cards[0].symbolKey = 'absent'; },
       (d: any) => { d.symbols.push(d.symbols[0]); },
       (d: any) => { d.cards.push(d.cards[0]); },
-      (d: any) => { d.symbols = Array(129).fill(d.symbols[0]); },
-      (d: any) => { d.cards = Array(33).fill(d.cards[0]); },
+      (d: any) => { d.cards = null; },
     ];
     for (const mutate of mutations) {
       const doc = document(); mutate(doc);

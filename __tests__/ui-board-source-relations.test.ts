@@ -214,9 +214,12 @@ describe('bulk sibling source capacity', () => {
   it('reuses existing sources and admits the entire batch or none', () => {
     const existing = Array.from({ length: 32 }, (_, i) => `fn${i}`);
     expect(boardSiblingSourceCapacity(existing, ['fn0', 'fn1'], [])).toBeNull();
-    expect(boardSiblingSourceCapacity(existing, ['new'], [])).toContain('32 source cards');
+    expect(boardSiblingSourceCapacity(existing, ['new'], [])).toBeNull();
     const retained = Array.from({ length: 128 }, (_, i) => `id${i}`);
+    expect(boardSiblingSourceCapacity(retained, retained, retained)).toBeNull();
     expect(boardSiblingSourceCapacity(['id0'], ['id1'], retained)).toBeNull();
     expect(boardSiblingSourceCapacity([], ['new'], retained)).toContain('128 retained identities');
+    expect(boardSiblingSourceCapacity(['id0'], ['new', 'new'], retained.slice(0, 127))).toBeNull();
+    expect(boardSiblingSourceCapacity(['id0'], ['new', 'another'], retained.slice(0, 127))).toContain('128 retained identities');
   });
 });

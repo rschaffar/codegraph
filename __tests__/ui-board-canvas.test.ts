@@ -352,6 +352,27 @@ describe('Board pointer interactions and placement', () => {
     expect(recipe.cards[0].zIndex).toBeGreaterThan(firstZ); expect(selectedIds()).toEqual(['code:a']); expect(recipe.viewport).toEqual(view);
   });
 
+  it('opens the 33rd source card and restores every card without changing existing geometry, pins or viewport', async () => {
+    const sources = Array.from({ length: 32 }, (_, i): BoardSymbol => ({ ...b, id: `source${i}`, name: `source${i}`, qualifiedName: `source${i}` }));
+    facts.push(...sources);
+    const recipe = records.get('a')!.document;
+    sources.forEach((item, i) => {
+      recipe.symbols.push({ ...documentFor(item).symbols[0], key: `source${i}`, included: false });
+      recipe.cards.push({ key: `card${i}`, symbolKey: `source${i}`, position: { x: i * 20, y: i * 10 }, width: 530, height: 310, collapsed: true, zIndex: i + 10 });
+    });
+    await render(); await open();
+    const before = await savedState(); expect(before.cards).toHaveLength(32);
+    await click('Open Beta source');
+    const after = await savedState(); expect(after.cards).toHaveLength(33);
+    const targetKey = after.symbols.find((item) => item.identity.id === b.id)!.key;
+    expect(after.cards.some((item) => item.symbolKey === targetKey)).toBe(true);
+    expect(identityGeometry({ ...after, cards: after.cards.filter((item) => item.symbolKey !== targetKey) }).cards).toEqual(identityGeometry(before).cards);
+    expect(identityGeometry(after).symbols).toEqual(identityGeometry(before).symbols);
+    expect(after.viewport).toEqual(view);
+    await click('New'); await open('Pointer review');
+    expect(identityGeometry(await savedState())).toEqual(identityGeometry(after));
+  });
+
   it('uses the pin click rather than a restored source-only placeholder position', async () => {
     const recipe = records.get('a')!.document; recipe.symbols[0].expanded = true;
     recipe.symbols.push({ ...documentFor(children[0]).symbols[0], key: 'member', included: false, position: { x: 30, y: 30 } });
@@ -406,12 +427,51 @@ describe('Board pointer interactions and placement', () => {
     expect((await savedState()).cards).toHaveLength(children.length);
   });
 
-  it('opens no sibling prefix when the full batch exceeds source-card capacity', async () => {
+  it('opens all 40 paged sibling sources without a separate source-card cap', async () => {
+    const siblings = Array.from({ length: 40 }, (_, i): BoardSymbol => ({ ...children[0], id: `sibling${i}`, name: `sibling${i}`,
+      qualifiedName: `Alpha.sibling${i}`, line: i + 20, endLine: i + 20 }));
+    facts.push(...siblings);
     await render(); await open(); await click('Expand Alpha members'); await click('Open Alpha.member0 source');
-    calls.boardSiblingSources.mockResolvedValueOnce({ symbols: clone(facts), items: clone(children), total: 40, nextOffset: 12, bounded: false, notes: [], excluded: noExclusions });
+    const before = await savedState();
+    calls.boardSiblingSources.mockResolvedValueOnce({ symbols: clone(facts), items: clone(siblings.slice(0, 20)), total: 40, nextOffset: 20, bounded: false, notes: [], excluded: noExclusions });
+    calls.boardSiblingSources.mockResolvedValueOnce({ symbols: clone(facts), items: clone(siblings.slice(20)), total: 40, nextOffset: null, bounded: false, notes: [], excluded: noExclusions });
     await click('Open sibling sources for member0');
-    expect(host.textContent).toContain('32-card board limit');
+    const after = await savedState();
+    const byKey = new Map(after.symbols.map((item) => [item.key, item.identity.id]));
+    expect(after.cards.map((item) => byKey.get(item.symbolKey)).sort()).toEqual([children[0].id, ...siblings.map((item) => item.id)].sort());
+    expect(after.symbols.filter((item) => item.included)).toEqual(before.symbols.filter((item) => item.included));
+    expect(after.cards[0].position).toEqual(before.cards[0].position); expect(after.viewport).toEqual(before.viewport);
+    expect(calls.boardSiblingSources.mock.calls.map(([request]) => request)).toMatchObject([{ offset: 0 }, { offset: 20 }]);
+  });
+
+  it('opens no sibling prefix when the full batch exceeds the shared retained-identity limit', async () => {
+    await render(); await open(); await click('Expand Alpha members'); await click('Open Alpha.member0 source');
+    calls.boardSiblingSources.mockResolvedValueOnce({ symbols: clone(facts), items: clone(children), total: 129, nextOffset: 12, bounded: false, notes: [], excluded: noExclusions });
+    await click('Open sibling sources for member0');
+    expect(host.textContent).toContain('128 retained identities');
+    expect(calls.boardSiblingSources).toHaveBeenCalledTimes(1);
     expect((await savedState()).cards).toHaveLength(1);
+  });
+
+  it('keeps a paged sibling batch atomic when existing hidden identities exhaust the shared budget', async () => {
+    const retained = Array.from({ length: 124 }, (_, i): BoardSymbol => ({ ...b, id: `retained${i}`, name: `retained${i}`, qualifiedName: `retained${i}` }));
+    facts.push(...retained);
+    const recipe = records.get('a')!.document;
+    retained.forEach((item, i) => recipe.symbols.push({ ...documentFor(item).symbols[0], key: `retained${i}`, included: false, hidden: true }));
+    recipe.symbols.push({ ...documentFor(children[0]).symbols[0], key: 'origin', included: false });
+    recipe.cards.push({ key: 'origin-card', symbolKey: 'origin', position: { x: 100, y: 200 }, width: 530, height: 310, collapsed: false, zIndex: 12 });
+    await render(); await open();
+    const before = await savedState(); expect(before.symbols).toHaveLength(127);
+    const pending = deferred<Awaited<ReturnType<typeof calls.boardSiblingSources>>>();
+    calls.boardSiblingSources.mockResolvedValueOnce({ symbols: clone(facts), items: [clone(children[1])], total: 2, nextOffset: 1, bounded: false, notes: [], excluded: noExclusions });
+    calls.boardSiblingSources.mockImplementationOnce(() => pending.promise);
+    await click('Open sibling sources for member0');
+    expect(calls.boardSiblingSources).toHaveBeenCalledTimes(2);
+    expect(host.querySelector('[data-id="code:m1"]')).toBeNull();
+    expect(host.querySelector('[data-id="code:m2"]')).toBeNull();
+    pending.resolve({ symbols: clone(facts), items: [clone(children[2])], total: 2, nextOffset: null, bounded: false, notes: [], excluded: noExclusions });
+    await settle(); expect(host.textContent).toContain('128 retained identities');
+    expect(identityGeometry(await savedState())).toEqual(identityGeometry(before));
   });
 
   it('centers menu and keyboard openings in the current view rather than using their screen click', async () => {

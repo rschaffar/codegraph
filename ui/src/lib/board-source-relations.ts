@@ -82,9 +82,8 @@ export function boardSourceRelations(
   return [...grouped.values()];
 }
 
-/** Atomic bulk admission: never silently open a prefix when a board limit is hit. */
+/** Atomic bulk admission: source cards share the board's retained-identity budget. */
 export function boardSiblingSourceCapacity(existing: readonly string[], siblings: readonly string[], retained: readonly string[]): string | null {
-  if (new Set([...existing, ...siblings]).size > 32) return 'Opening all sibling sources would exceed 32 source cards. Close some cards first; none were opened.';
   if (new Set([...retained, ...existing, ...siblings]).size > 128) return 'Opening all sibling sources would exceed 128 retained identities. Remove some items first; none were opened.';
   return null;
 }
