@@ -117,10 +117,10 @@ async function nativeWheelAt(base, point, dy) {
     await send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: point.x, y: point.y, deltaX: 0, deltaY: dy }, sessionId);
   } finally { clearTimeout(timer); socket.close(); }
 }
-async function dragPoint(point, dx, dy) {
-  command('mouse', 'move', String(point.x), String(point.y)); command('mouse', 'down');
+async function dragPoint(point, dx, dy, button = 'left') {
+  command('mouse', 'move', String(point.x), String(point.y)); command('mouse', 'down', button);
   for (let step = 1; step <= 4; step++) command('mouse', 'move', String(Math.round(point.x + dx * step / 4)), String(Math.round(point.y + dy * step / 4)));
-  command('mouse', 'up'); await delay(100);
+  command('mouse', 'up', button); await delay(100);
 }
 try {
   const base = await serve();
@@ -156,7 +156,11 @@ try {
   click('Wider'); click('Taller'); click('Collapse code card entry');
   pass('source-card resize and collapsed expanded-height preservation prepared');
 
-  click('Fit graph'); await delay(250); click('Hide normalize'); click('Hidden items (1)');
+  click('Fit graph'); await delay(250);
+  // Source cards may overlap the graph. Select the target with the keyboard to
+  // bring it forward before clicking its controls; never force a covered click.
+  command('focus', `.svelte-flow__node-symbol[data-id="${normalize.id}"]`); command('press', 'Enter');
+  click('Hide normalize'); click('Hidden items (1)');
   await waitFor('document.querySelector(`aside[aria-label="Hidden items"]`)', 'named hidden list'); click('Restore');
   await waitFor('document.querySelectorAll("[data-symbol]").length===2', 'restore'); command('press', 'Escape');
   await waitFor('!document.querySelector(`aside[aria-label="Hidden items"]`)', 'Escape after restoring last hidden row');
@@ -169,7 +173,7 @@ try {
   await dragPoint(headerPoint, 45, 24);
   assert.equal(evaluate('return document.querySelector(".svelte-flow__node-symbol").style.transform!==window.__dragPosition;'), true);
   const panPoint = evaluate('const box=document.querySelector(".svelte-flow__pane").getBoundingClientRect(); window.__panViewport=document.querySelector(".svelte-flow__viewport").style.transform; for (const [x,y] of [[box.right-140,box.top+120],[box.right-280,box.bottom-120],[box.left+100,box.bottom-180]]) {const el=document.elementFromPoint(x,y);if(el?.closest(".svelte-flow__pane")&&!el.closest(".svelte-flow__node,.svelte-flow__controls,.svelte-flow__minimap,aside,button"))return{x:Math.round(x),y:Math.round(y)};} throw new Error("No unobstructed canvas pan point");');
-  await dragPoint(panPoint, -55, 35);
+  await dragPoint(panPoint, -55, 35, 'right');
   assert.equal(evaluate('return document.querySelector(".svelte-flow__viewport").style.transform!==window.__panViewport;'), true);
   evaluate('window.__zoomScale=new DOMMatrixReadOnly(document.querySelector(".svelte-flow__viewport").style.transform).a; window.__wheelEvents=[]; window.addEventListener("wheel",event=>{const receipt={target:event.target?.tagName,className:String(event.target?.className),x:event.clientX,y:event.clientY,dy:event.deltaY,ctrl:event.ctrlKey,trusted:event.isTrusted}; window.__wheelEvents.push(receipt);setTimeout(()=>receipt.prevented=event.defaultPrevented,0);},{capture:true}); return true;');
   command('mouse', 'move', String(panPoint.x), String(panPoint.y)); await nativeWheelAt(base, panPoint, -180);
@@ -313,6 +317,41 @@ try {
   pass('long source scrolling does not pan or zoom the board');
   fill('Board name', 'Hub board'); click('Save'); await waitFor('!document.querySelector(".savebar").textContent.includes("Unsaved")', 'hub board save');
   pass('hub outline paging, frozen target windows, scoped Back and laptop/keyboard focus recovery');
+
+  // Seed a near-ceiling source card, then cross the former bound using real
+  // resize-handle input at non-unit zoom and the keyboard Size controls.
+  const tallDocument = { version: 1, symbols: [{ key: 'source', identity: { id: normalize.id, qualifiedName: normalize.qualifiedName, kind: normalize.kind, file: normalize.file },
+    position: { x: 0, y: 0 }, included: false, hidden: false, expanded: false }],
+    cards: [{ key: 'card', symbolKey: 'source', position: { x: 0, y: 0 }, width: 530, height: 4080, collapsed: false, zIndex: 10 }],
+    viewport: { x: 200, y: 80, zoom: .15 }, filters: { kind: '', showStructure: false } };
+  const tallResponse = await fetch(`${base}/api/boards`, { method: 'POST', headers: { 'content-type': 'application/json', 'X-CodeGraph-UI': '1' }, body: JSON.stringify({ name: 'Height board', document: tallDocument }) });
+  assert.ok(tallResponse.ok); const tallSaved = await tallResponse.json();
+  command('set', 'viewport', '1440', '1000'); click('New'); click('Saved boards'); click('Open Height board');
+  await waitFor('document.querySelectorAll("[data-code-card]").length===1', 'tall source restored');
+  command('focus', '.svelte-flow__node-code'); command('press', 'Enter');
+  await waitFor('document.querySelector(".svelte-flow__node-code .svelte-flow__resize-control.bottom.right.handle")', 'tall source resize handle');
+  const resizePoint = evaluate('window.__tall=document.querySelector(".svelte-flow__node-code"); window.__tallPosition=window.__tall.style.transform; window.__tallViewport=document.querySelector(".svelte-flow__viewport").style.transform; const handle=window.__tall.querySelector(".svelte-flow__resize-control.bottom.right.handle").getBoundingClientRect(); return {x:Math.round(handle.x+handle.width/2),y:Math.round(handle.y+handle.height/2)};');
+  assert.equal(evaluate('return parseFloat(window.__tall.style.height);'), 4080);
+  assert.ok(Math.abs(evaluate('return new DOMMatrixReadOnly(window.__tallViewport).a;') - .15) < 1e-6);
+  await dragPoint(resizePoint, 0, 40);
+  const draggedHeight = evaluate('return parseFloat(window.__tall.style.height);'); assert.ok(draggedHeight > 4096, `native height ${draggedHeight}`);
+  evaluate('window.__tall.querySelector(".size").open=true; [...window.__tall.querySelectorAll("button")].find(button=>button.textContent==="Taller").focus(); return true;');
+  command('press', 'Enter');
+  await waitFor(`Math.abs(parseFloat(window.__tall.style.height)-${draggedHeight + 80})<1e-6`, 'keyboard height beyond former ceiling');
+  const tallHeight = evaluate('return parseFloat(window.__tall.style.height);');
+  assert.equal(evaluate('return window.__tall.style.width;'), '530px');
+  assert.equal(evaluate('return window.__tall.style.transform===window.__tallPosition&&document.querySelector(".svelte-flow__viewport").style.transform===window.__tallViewport;'), true);
+  click('Collapse code card normalize'); click('Save'); await waitFor('!document.querySelector(".savebar").textContent.includes("Unsaved")', 'tall collapsed save');
+  const tallStored = (await api(`/api/boards/${tallSaved.id}`)).board;
+  assert.equal(tallStored.cards[0].height, tallHeight); assert.equal(tallStored.cards[0].collapsed, true);
+  click('New'); click('Saved boards'); click('Open Height board'); await waitFor('document.querySelector("[data-code-card]")', 'tall collapsed reopen');
+  click('Expand code card normalize');
+  await waitFor(`Math.abs(parseFloat(document.querySelector(".svelte-flow__node-code").style.height)-${tallHeight})<1e-6`, 'tall expanded height restored');
+  click('Save'); await waitFor('!document.querySelector(".savebar").textContent.includes("Unsaved")', 'tall expanded save');
+  const tallReopened = (await api(`/api/boards/${tallSaved.id}`)).board;
+  // Expanding raises the card; every other saved layout property is unchanged.
+  assert.deepEqual(arrangement(tallReopened), arrangement({ ...tallStored, cards: tallStored.cards.map(card => ({ ...card, collapsed: false, zIndex: tallReopened.cards[0].zIndex })) }));
+  pass('source height exceeds 4096 via native drag and keyboard controls, with collapsed Save/Open preservation', { zoom: .15, draggedHeight, tallHeight });
 
   const readOnlyBase = await serve(true);
   command('open', `${readOnlyBase}/#/board`); await waitFor('document.querySelector(`[aria-label="Board name"]`)', 'read-only Board');

@@ -539,7 +539,7 @@
   }
   function closeCard(id: string) { nodes = nodes.filter((node) => node.id !== id); sourceHeights.delete(id); void tick().then(() => boardElement?.querySelector<HTMLElement>('[data-add-symbols]')?.focus()); }
   function resizeCard(id: string, widthDelta: number, heightDelta: number) {
-    nodes = nodes.map((node) => node.id === id && node.type === 'code' ? { ...node, width: Math.max(380, Math.min(4096, (node.width ?? node.measured?.width ?? 530) + widthDelta)), height: Math.max(190, Math.min(4096, (node.height ?? node.measured?.height ?? 310) + heightDelta)) } : node);
+    nodes = nodes.map((node) => node.id === id && node.type === 'code' ? { ...node, width: Math.max(380, Math.min(4096, (node.width ?? node.measured?.width ?? 530) + widthDelta)), height: Math.max(190, (node.height ?? node.measured?.height ?? 310) + heightDelta) } : node);
   }
   function followSource(target: BoardSymbol, line?: number, event?: MouseEvent) { merge([target]); openCode(target.id, true, line ?? null, event); }
   function toggleCard(id: string) {

@@ -93,9 +93,10 @@ function boardSignature(value: unknown): string {
   }
   return value;
 }
-function number(value: unknown, min: number, max: number): number {
+function number(value: unknown, min: number, max = Infinity): number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) {
-    throw badRequest(`Board geometry must be finite and between ${min} and ${max}.`);
+    const range = max === Infinity ? `at least ${min}` : `between ${min} and ${max}`;
+    throw badRequest(`Board geometry must be finite and ${range}.`);
   }
   return value;
 }
@@ -177,7 +178,7 @@ export function parseBoardDocument(raw: unknown): BoardDocument {
     cardSymbols.add(symbolKey);
     const zIndex = number(c.zIndex, 0, 1_000_000);
     if (!Number.isInteger(zIndex)) throw badRequest('Board zIndex must be an integer.');
-    return { key, symbolKey, position: position(c.position), width: number(c.width, 100, 4096), height: number(c.height, 60, 4096), collapsed: boolean(c.collapsed), zIndex };
+    return { key, symbolKey, position: position(c.position), width: number(c.width, 100, 4096), height: number(c.height, 60), collapsed: boolean(c.collapsed), zIndex };
   });
   if (v.comments !== undefined && (!Array.isArray(v.comments) || v.comments.length > MAX_BOARD_COMMENTS)) {
     throw badRequest(`A board holds at most ${MAX_BOARD_COMMENTS} comment cards.`);

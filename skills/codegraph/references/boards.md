@@ -5,8 +5,9 @@
 This describes the **local Review Board extension**, checked against CodeGraph
 1.6.2, source commit `51e3b8791787c6bdfa5880669a2c87d683a26717` (2026-11-08),
 including plain-text comment cards. This reference also reflects the subsequent
-removal of the separate 32-source-panel cap. Older builds may still enforce that
-cap or reject the `comments` field; check capabilities before sending boards.
+removal of the separate 32-source-panel and 4,096-pixel source-height caps. Older
+builds may still enforce those caps or reject the `comments` field; check
+capabilities before sending boards.
 Version number alone does not prove a build has Board support. When upgrading or
 using another installation, check its capabilities and current format first.
 In an available CodeGraph source checkout, the maintained owners are:
@@ -138,9 +139,9 @@ are allowed.
 Checked limits: 128 symbol entries (including hidden/source-only entries), one
 source panel per symbol with no separate panel-count cap, 64 comment cards,
 16,384 characters per comment, 1 MiB per import/stored file,
-coordinates within ±1,000,000, zoom 0.05–8, source width 100–4096 and height
-60–4096. `zIndex` is an integer from 0–1,000,000; optional `memberLimit` is an
-integer from 1–2048. These include hidden/source-only entries. Check the current
+coordinates within ±1,000,000, zoom 0.05–8, source width 100–4096 and finite source
+height at least 60 (no height ceiling). `zIndex` is an integer from 0–1,000,000;
+optional `memberLimit` is an integer from 1–2048. These include hidden/source-only entries. Check the current
 validator for all limits; split an oversized selection instead of dropping items
 silently. Metadata also consumes space, so stay below the maximum file size.
 

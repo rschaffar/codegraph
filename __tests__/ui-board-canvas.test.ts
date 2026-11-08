@@ -852,6 +852,27 @@ describe('Board replacement and metadata request lifetimes', () => {
 });
 
 describe('identity-keyed arrangement restoration', () => {
+  it('grows source height beyond 4096 and preserves it through collapse, Save/Open and expansion', async () => {
+    const recipe = records.get('a')!.document;
+    recipe.cards = [{ key: 'card-a', symbolKey: 's0', position: { x: 620, y: 710 }, width: 640, height: 4080, collapsed: false, zIndex: 18 }];
+    recipe.viewport = { x: -42, y: 81, zoom: .7 };
+    await render(); await open();
+    const card = () => host.querySelector<HTMLElement>('.svelte-flow__node[data-id="code:a"]')!;
+    expect(card().style.height).toBe('4080px');
+    const sourceRequests = calls.source.mock.calls.length;
+    await click('Taller'); expect(card().style.height).toBe('4160px');
+    expect(calls.source).toHaveBeenCalledTimes(sourceRequests);
+    await click('Collapse code card Alpha'); expect(card().style.height).toBe('82px');
+    await click('Save');
+    const saved = clone(calls.saveBoard.mock.calls.at(-1)![0].document);
+    // Interacting with a card raises it; its dimensions and placement stay fixed.
+    expect(identityGeometry(saved)).toEqual(identityGeometry({ ...recipe, cards: [{ ...recipe.cards[0], height: 4160, collapsed: true, zIndex: saved.cards[0].zIndex }] }));
+    await click('New'); await open(); expect(card().style.height).toBe('82px');
+    await click('Expand code card Alpha'); expect(card().style.height).toBe('4160px');
+    await click('Save'); const expanded = calls.saveBoard.mock.calls.at(-1)![0].document;
+    expect(identityGeometry(expanded)).toEqual(identityGeometry({ ...saved, cards: [{ ...saved.cards[0], collapsed: false, zIndex: expanded.cards[0].zIndex }] }));
+  });
+
   it('round-trips positions, viewport, visibility, member limits and independent source cards through moved/missing/ambiguous identities', async () => {
     facts = facts.map((item) => item.id === 'a' ? { ...item, id: 'a-current', line: 25, endLine: 125 }
       : item.id === 'b' ? { ...item, id: 'b-current' } : { ...item, ownerId: item.ownerId === 'a' ? 'a-current' : item.ownerId });

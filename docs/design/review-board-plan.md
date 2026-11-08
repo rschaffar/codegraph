@@ -206,8 +206,11 @@ them. Default source readers outside the Board remain verbatim.
 A code card identifies its symbol, owner when present and current file:line.
 Cards are independent canvas items, not extra indexed graph nodes or code editors.
 Move, resize, collapse, close and bring to front independently; scrolling a
-card scrolls its source, not the board. Code links can open another card rather
-than replacing the entire scene. Reopening an existing source card selects and
+card scrolls its source, not the board. Source-card height has no fixed ceiling:
+drag handles and Size controls can grow cards beyond 4,096 pixels, and Save/Open
+retains that height even when collapsed. Heights must remain finite; width and
+comment-card limits are unchanged. Code links can open another card rather than
+replacing the entire scene. Reopening an existing source card selects and
 raises it without moving it or the viewport, even when it is off-screen. Selecting
 a card highlights the related graph symbol/evidence on the diagram. A fit/read action makes a card readable after
 zooming out.
