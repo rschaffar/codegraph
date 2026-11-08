@@ -180,9 +180,9 @@ shapes, drawn arrows, formatted text and collaborative editing remain deferred.
 ### Source cards
 
 Class/type source cards offer **Detach** beside each eligible indexed method
-start line. It opens/reuses that method's source card, applies the normal card
-limits and automatic body folding, and leaves existing cards, viewport and pins
-unchanged. Only fresh, proven members in the current eligible source scope get
+start line. It opens/reuses that method's source card, applies the shared
+retained-identity limit and automatic body folding, and leaves existing cards,
+viewport and pins unchanged. Only fresh, proven members in the current eligible source scope get
 action controls; stale/current-file reading and ancestor-only cached facts do not.
 
 When a type's full source and a contained method's source card are both open,
@@ -217,8 +217,8 @@ methods of the nearest proven indexed type, or other top-level free functions in
 the exact same file when there is no type owner. Nested local functions and
 methods of unrelated types are not file siblings. Discovery respects the Board
 filters, does not pin symbols, reuses existing source cards and preserves their
-positions and the viewport. The entire batch must fit the existing 32-source-card
-and 128-retained-identity limits; otherwise no partial batch is opened.
+positions and the viewport. Source cards have no separate count cap; the entire
+batch must fit the shared 128-retained-identity limit or no partial batch is opened.
 
 Source cards have their own typed relationship layer, never connections to symbol
 cards. Only relationships originating in a callable (including its parameters or
@@ -380,9 +380,10 @@ merely because old discovery facts remain cached. Retained/requested outline row
 outside the current filter/page are labelled separately from eligible totals.
 
 Bounds remain explicit: 128 retained identities (including expanded/hidden and
-source-only identities), 32 source cards, 2,048 symbols per projection contains
-scope, 64 containment levels, 2,048 ancestor identities and 5,000 projection
-relationships. Each outline reveal is capped at 2,048 eligible rows; Connections
+source-only identities). Each identity may have one source card, with no separate
+source-card count cap. Projection remains bounded at 2,048 symbols per contains
+scope, 64 containment levels, 2,048 ancestor identities and 5,000 relationships.
+Each outline reveal is capped at 2,048 eligible rows; Connections
 can inspect/pin the remainder without making a recipe unsaveable. Discovery-only
 facts have a 16K cache target, with current/retained/displayed facts protected.
 Search, groups, targets, members, source and evidence requests are paged/bounded;

@@ -11,7 +11,6 @@ export const MAX_BOARDS = 200;
 export const MAX_BOARD_SCAN_ENTRIES = 400;
 export const MAX_BOARD_FILE_BYTES = 1024 * 1024;
 export const MAX_BOARD_SYMBOLS = 128;
-export const MAX_BOARD_CARDS = 32;
 export const MAX_BOARD_COMMENTS = 64;
 export const MAX_BOARD_COMMENT_TEXT = 16_384;
 export const MAX_BOARD_NAME = 120;
@@ -143,7 +142,8 @@ export function parseBoardDocument(raw: unknown): BoardDocument {
   const v = object(raw, ['version', 'symbols', 'cards', 'comments', 'viewport', 'filters']);
   if (v.version !== 1) throw badRequest('Unsupported board version (expected 1).');
   if (!Array.isArray(v.symbols) || v.symbols.length > MAX_BOARD_SYMBOLS) throw badRequest(`A board holds at most ${MAX_BOARD_SYMBOLS} symbols.`);
-  if (!Array.isArray(v.cards) || v.cards.length > MAX_BOARD_CARDS) throw badRequest(`A board holds at most ${MAX_BOARD_CARDS} cards.`);
+  if (!Array.isArray(v.cards)) throw badRequest('Expected a board source-card array.');
+  if (v.cards.length > v.symbols.length) throw badRequest('A board symbol may have only one source card.');
   const symbolKeys = new Set<string>();
   const symbolIdentities = new Set<string>();
   const symbols = v.symbols.map((rawSymbol) => {

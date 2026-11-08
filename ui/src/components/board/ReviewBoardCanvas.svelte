@@ -552,7 +552,6 @@
   function readCard(id: string) { void tick().then(() => fitView({ nodes: [{ id }], padding: 0.25, maxZoom: 1.1, duration: 200 })); }
   function openCode(id: string, activate = true, highlight: number | null = null, event?: MouseEvent, position?: { x: number; y: number }) {
     event?.stopPropagation();
-    if (codeCount >= 32 && !nodes.some((node) => node.id === `code:${id}`)) { error = 'Close a source card before opening another (maximum 32).'; return; }
     if (new Set([...included, ...expanded, ...hidden, ...nodes.filter((node) => node.type === 'code').map((node) => node.data.symbolId), id]).size > 128) { error = 'This board already retains 128 symbol identities. Close a source-only card or start another board.'; return; }
     const item = model.symbol(id); const key = `code:${id}`;
     if (nodes.some((node) => node.id === key)) nodes = nodes.map((node) => node.id === key && node.type === 'code' ? { ...node, selected: true, zIndex: ++zIndex, data: { ...node.data, highlight } } : { ...node, selected: false });
@@ -614,7 +613,7 @@
         if (controller.signal.aborted || generation !== epoch) return;
         if (page.scope?.kind === 'unavailable') throw new Error(page.notes?.join(' ') || 'No uniquely proven sibling scope is available.');
         if (page.bounded) throw new Error('The sibling scope is incomplete or ambiguous; no source cards were opened. Inspect Connections instead.');
-        if (page.total > 32) throw new Error('This scope has more sibling sources than the 32-card board limit. Open individual sources through Connections instead.');
+        if (page.total > 128) throw new Error('Opening all sibling sources would exceed 128 retained identities. Remove some items first; none were opened.');
         for (const item of page.items) items.set(item.id, item);
         if (page.nextOffset !== null && page.nextOffset <= offset) throw new Error('Sibling paging did not advance; no source cards were opened.');
         offset = page.nextOffset;
