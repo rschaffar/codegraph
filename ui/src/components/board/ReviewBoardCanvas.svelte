@@ -4,6 +4,8 @@
   import '@xyflow/svelte/dist/style.css';
   import BoardSymbolNode from './BoardSymbolNode.svelte';
   import BoardSourceCard from './BoardSourceCard.svelte';
+  import BoardCommentCard from './BoardCommentCard.svelte';
+  import { BOARD_COMMENT_LIMIT, BOARD_COMMENT_TEXT_LIMIT, type CommentCardData } from '../../lib/board-comments';
   import BoardRelationEdge from './BoardRelationEdge.svelte';
   import KindGlyph from '../KindGlyph.svelte';
   import { getGraphAdapter } from '../../lib/adapter';
@@ -18,9 +20,9 @@
   const adapter = getGraphAdapter();
   const { fitView, screenToFlowPosition, getIntersectingNodes } = useSvelteFlow();
   const flow = $derived(useStore());
-  const nodeTypes = { symbol: BoardSymbolNode, code: BoardSourceCard };
+  const nodeTypes = { symbol: BoardSymbolNode, code: BoardSourceCard, comment: BoardCommentCard };
   const edgeTypes = { relation: BoardRelationEdge };
-  type BoardNode = Node<SymbolData, 'symbol'> | Node<SourceCardData, 'code'>;
+  type BoardNode = Node<SymbolData, 'symbol'> | Node<SourceCardData, 'code'> | Node<CommentCardData, 'comment'>;
   let symbols = $state<BoardSymbol[]>([]);
   let relations = $state<BoardEvidence[]>([]);
   let sourceSnapshot = $state<BoardSnapshot | null>(null);
@@ -163,6 +165,7 @@
   const related = $derived(model.sourceSelection(selectedSources, included, hidden));
   const lastHidden = $derived([...hideHistory].reverse().find((id) => hidden.includes(id)));
   const codeCount = $derived(nodes.filter((node) => node.type === 'code').length);
+  const commentCount = $derived(nodes.filter((node) => node.type === 'comment').length);
   const dirty = $derived(savedFingerprint !== fingerprint());
   const readOnly = $derived(boardList?.readOnly !== false || !adapter.saveBoard);
   const allNodeKinds = $derived([...new Set([...nodeKinds, ...symbols.map((item) => item.kind), ...(groupPage?.items ?? []).flatMap((item) => item.byKind.map((entry) => entry.kind)), ...(libraryKind ? [libraryKind] : [])])]);
@@ -216,7 +219,7 @@
       graph.push({ ...old, id: item.symbol.id, type: 'symbol', position, dragHandle: '.board-drag-handle', connectable: false,
         data: { ...item, hidden, pinned: included.filter((id) => !hidden.includes(id)), expanded: expanded.includes(item.symbol.id), locatedMember, canPinMembers: true, canOpenSiblingSources: !!adapter.boardSiblingSources, siblingsBusy, related: related.representatives.has(item.symbol.id), relatedIds: related.members, act } });
     }
-    nodes = [...graph, ...nodes.filter((node) => node.type === 'code').map((node) => node.type === 'code' ? { ...node, data: { ...node.data, filters, follow: followSource, resize: resizeCard, siblings: openSiblingSources, siblingsBusy, siblingsAvailable: !!adapter.boardSiblingSources, sourceState: reportSourceState } } : node)];
+    nodes = [...graph, ...nodes.filter((node) => node.type !== 'symbol').map((node) => node.type === 'code' ? { ...node, data: { ...node.data, filters, follow: followSource, resize: resizeCard, siblings: openSiblingSources, siblingsBusy, siblingsAvailable: !!adapter.boardSiblingSources, sourceState: reportSourceState } } : node)];
   }
   // Flow replaces selection during a marquee, even with its multi-select key held.
   function startPointerSelection(event: PointerEvent) {
@@ -514,6 +517,26 @@
     positions.delete(id); hideHistory = hideHistory.filter((item) => item !== id); selected = null;
     await loadSnapshot(); if (generation === epoch) notice = 'Removed from the board recipe only. Any independent source card remains open.';
   }
+  function commentNode(comment: NonNullable<BoardDocument['comments']>[number]): Node<CommentCardData, 'comment'> {
+    return { id: `comment:${comment.key}`, type: 'comment', position: { ...comment.position }, width: comment.width, height: comment.height,
+      zIndex: comment.zIndex, dragHandle: '.board-drag-handle', connectable: false,
+      data: { text: comment.text, edit: editComment, close: closeCard, resize: resizeComment } };
+  }
+  function addComment() {
+    if (commentCount >= BOARD_COMMENT_LIMIT) { error = `A board holds at most ${BOARD_COMMENT_LIMIT} comment cards.`; return; }
+    const node = commentNode({ key: `n_${crypto.randomUUID()}`, text: '', position: openingPosition(undefined, 320, 240), width: 320, height: 240, zIndex: ++zIndex });
+    nodes = [...nodes.map((item) => ({ ...item, selected: false })), { ...node, selected: true }];
+    panel = null; evidence = null; selected = null;
+    void tick().then(() => boardElement?.querySelector<HTMLTextAreaElement>(`[data-id="${CSS.escape(node.id)}"] textarea`)?.focus({ preventScroll: true }));
+  }
+  function editComment(id: string, text: string) {
+    nodes = nodes.map((node) => node.id === id && node.type === 'comment' ? { ...node, data: { ...node.data, text: text.slice(0, BOARD_COMMENT_TEXT_LIMIT) } } : node);
+  }
+  function resizeComment(id: string, widthDelta: number, heightDelta: number) {
+    nodes = nodes.map((node) => node.id === id && node.type === 'comment' ? { ...node,
+      width: Math.max(240, Math.min(4096, (node.width ?? 320) + widthDelta)),
+      height: Math.max(160, Math.min(4096, (node.height ?? 240) + heightDelta)) } : node);
+  }
   function closeCard(id: string) { nodes = nodes.filter((node) => node.id !== id); sourceHeights.delete(id); void tick().then(() => boardElement?.querySelector<HTMLElement>('[data-add-symbols]')?.focus()); }
   function resizeCard(id: string, widthDelta: number, heightDelta: number) {
     nodes = nodes.map((node) => node.id === id && node.type === 'code' ? { ...node, width: Math.max(380, Math.min(4096, (node.width ?? node.measured?.width ?? 530) + widthDelta)), height: Math.max(190, Math.min(4096, (node.height ?? node.measured?.height ?? 310) + heightDelta)) } : node);
@@ -640,12 +663,17 @@
   }
   function documentState(): BoardDocument {
     const ids = [...new Set([...included, ...expanded, ...hidden, ...nodes.filter((node) => node.type === 'code').map((node) => node.data.symbolId as string)])];
-    const keys = new Map(ids.map((id, index) => [id, `s${index}`]));
+    // Imported comment keys are durable and may resemble our generated s/c keys.
+    const claimedKeys = new Set(nodes.filter((node) => node.type === 'comment').map((node) => node.id.slice('comment:'.length)));
+    function freshKey(preferred: string) { let key = preferred; while (claimedKeys.has(key)) key += '_'; claimedKeys.add(key); return key; }
+    const keys = new Map(ids.map((id, index) => [id, freshKey(`s${index}`)]));
     return { version: 1, symbols: ids.flatMap((id) => {
       const item = symbols.find((value) => value.id === id); if (!item) return [];
       return [{ key: keys.get(id)!, identity: originalIdentities.get(id) ?? { id: item.id, qualifiedName: item.qualifiedName, kind: item.kind, file: item.file, ...(item.signature ? { signature: item.signature } : {}) },
         position: { ...(nodes.find((node) => node.id === id)?.position ?? positions.get(id) ?? { x: 30, y: 30 }) }, included: included.includes(id), hidden: hidden.includes(id), expanded: expanded.includes(id), ...(limits[id] ? { memberLimit: limits[id] } : {}) }];
-    }), cards: nodes.filter((node) => node.type === 'code').map((node, index) => ({ key: `c${index}`, symbolKey: keys.get(node.data.symbolId as string)!, position: { ...node.position }, width: node.width ?? node.measured?.width ?? 530, height: node.data.collapsed ? sourceHeights.get(node.id) ?? 310 : node.height ?? node.measured?.height ?? 310, collapsed: Boolean(node.data.collapsed), zIndex: node.zIndex ?? 10 })),
+    }), cards: nodes.filter((node) => node.type === 'code').map((node, index) => ({ key: freshKey(`c${index}`), symbolKey: keys.get(node.data.symbolId as string)!, position: { ...node.position }, width: node.width ?? node.measured?.width ?? 530, height: node.data.collapsed ? sourceHeights.get(node.id) ?? 310 : node.height ?? node.measured?.height ?? 310, collapsed: Boolean(node.data.collapsed), zIndex: node.zIndex ?? 10 })),
+      ...(commentCount ? { comments: nodes.filter((node) => node.type === 'comment').map((node) => ({ key: node.id.slice('comment:'.length), text: node.data.text,
+        position: { ...node.position }, width: node.width ?? node.measured?.width ?? 320, height: node.height ?? node.measured?.height ?? 240, zIndex: node.zIndex ?? 10 })) } : {}),
       viewport: { ...viewport }, filters: { kind, showStructure: structure, includeTests, includeGenerated, includeUncertain } };
   }
   function fingerprint(name = boardName, document = documentState()) { return JSON.stringify({ name, document }); }
@@ -723,6 +751,10 @@
       sourceHeights.set(`code:${id}`, card.height);
       zIndex = Math.max(zIndex, card.zIndex);
     }
+    for (const comment of value.board.comments ?? []) {
+      nodes = [...nodes, commentNode(comment)];
+      zIndex = Math.max(zIndex, comment.zIndex);
+    }
     viewport = { ...value.board.viewport };
     notice = 'Board restored; missing or ambiguous symbols are labelled placeholders. No fuzzy replacements.';
     commit();
@@ -797,7 +829,7 @@
       else if (key === 'a') { setPanel('library'); void search(); } else if (key === 'arrowleft' && panel === 'connections') void backConnections();
     } else if (event.key === 'Delete' && (event.target.matches('.svelte-flow__node') || event.target.matches('.board-drag-handle[tabindex]'))) {
       const id = event.target.closest<HTMLElement>('.svelte-flow__node')?.dataset.id;
-      if (id) { event.preventDefault(); event.stopPropagation(); if (id.startsWith('code:')) closeCard(id); else act('hide', id); }
+      if (id) { event.preventDefault(); event.stopPropagation(); if (id.startsWith('code:') || id.startsWith('comment:')) closeCard(id); else act('hide', id); }
     }
   }
   async function refreshIndex() {
@@ -819,14 +851,14 @@
 {:else}
 <div class="board" bind:this={boardElement} role="region" aria-label="Review Board">
   <div class="toolbar">
-    <div class="tools"><button class="primary" data-add-symbols onclick={() => { setPanel('library'); void search(); }}>+ Add symbols</button><button data-hidden-items onclick={() => setPanel('hidden')}>Hidden items ({hidden.length})</button>{#if lastHidden}<button onclick={() => restoreHidden([lastHidden!])}>Undo hide</button>{/if}
+    <div class="tools"><button class="primary" data-add-symbols onclick={() => { setPanel('library'); void search(); }}>+ Add symbols</button><button onclick={addComment} disabled={commentCount >= BOARD_COMMENT_LIMIT}>+ Add comment</button><button data-hidden-items onclick={() => setPanel('hidden')}>Hidden items ({hidden.length})</button>{#if lastHidden}<button onclick={() => restoreHidden([lastHidden!])}>Undo hide</button>{/if}
       <label>Edges <select aria-label="Canvas relationship filter" bind:value={kind} onchange={() => { evidence = null; refresh(); }}><option value="">All kinds</option>{#each allEdgeKinds as item}<option value={item}>{kindLabel(item)}</option>{/each}</select></label>
       <label><input type="checkbox" bind:checked={structure} onchange={refresh} /> Ownership arrows</label>
     </div>
     <div class="tools"><button disabled={busy || !adapter.resolveBoard || (!included.length && !codeCount && !expanded.length && !hidden.length)} onclick={refreshIndex}>Refresh index</button><button onclick={fitGraph}>Fit graph</button><button onclick={fitSelection}>Fit selection</button><button disabled={!codeCount} onclick={fitCode}>Fit code ({codeCount})</button><button onclick={tidy}>Tidy</button><button onclick={() => { setPanel('boards'); void listBoards(); }}>Saved boards</button><button onclick={newBoard}>New</button><button aria-expanded={helpOpen} onclick={() => helpOpen = !helpOpen}>Keyboard help</button></div>
   </div>
   <div class="visibility" aria-label="Board visibility filters"><span>Include:</span><label><input type="checkbox" bind:checked={includeTests} onchange={changeFilters} /> Tests</label><label><input type="checkbox" bind:checked={includeGenerated} onchange={changeFilters} /> Generated code</label><label><input type="checkbox" bind:checked={includeUncertain} onchange={changeFilters} /> Uncertain matches</label><span>Explicitly selected cards stay included.{#if exclusionLabel(excluded)} Excluded from loaded board: {exclusionLabel(excluded)}. Counts are disjoint in test → generated → uncertain order.{/if}</span></div>
-  {#if helpOpen}<section class="keyboard-help" aria-label="Board keyboard help"><b>Keyboard:</b> Tab to controls; Enter/Space activates. Focus a graph/source card and press Enter/Space to select it; arrow keys then move it (Shift for larger steps). Alt+G fits the graph, Alt+F fits selected cards, Alt+C fits code, Alt+A opens selection, Alt+Left returns in Connections, Ctrl/Cmd+S saves. Delete on a focused card hides it (or closes a source card). Escape closes the panel and restores focus. Source cards provide size buttons. Right-drag empty canvas to pan; left-drag to select touched cards (Shift adds). Shift-click toggles cards; drag a selected header to move the group.</section>{/if}
+  {#if helpOpen}<section class="keyboard-help" aria-label="Board keyboard help"><b>Keyboard:</b> Tab to controls; Enter/Space activates. Focus a graph/source/comment card and press Enter/Space to select it; arrow keys then move it (Shift for larger steps). Alt+G fits the graph, Alt+F fits selected cards, Alt+C fits code, Alt+A opens selection, Alt+Left returns in Connections, Ctrl/Cmd+S saves. Delete on a focused card hides it (or deletes a comment / closes a source card). Escape closes the panel and restores focus. Source and comment cards provide size buttons. Comment text is plain text and saved with the board. Right-drag empty canvas to pan; left-drag to select touched cards (Shift adds). Shift-click toggles cards; drag a selected header to move the group.</section>{/if}
   <div class="savebar"><input aria-label="Board name" placeholder="Name this board…" bind:value={boardName} maxlength={120} /><button disabled={readOnly || busy || saving || !boardName.trim()} onclick={() => save()}>Save</button><button disabled={readOnly || busy || saving || !boardName.trim()} onclick={() => save(true)}>Save as</button>
     <span>{dirty ? 'Unsaved changes' : boardId ? 'Saved' : 'New board'}{readOnly ? ` · ${boardList?.readOnlyReason ?? 'Read-only host'}` : ' · metadata only'}</span>
     <button onclick={exportBoard}>Export JSON</button><button disabled={!adapter.resolveBoard} onclick={() => importFile.click()}>Import JSON</button><input class="file-input" type="file" accept="application/json,.json" bind:this={importFile} onchange={importBoard} />
@@ -836,12 +868,12 @@
   {#if notes.length || sourceNotes.length}<details class="bounds"><summary>Index boundaries / query limits ({notes.length + sourceNotes.length})</summary>{#each [...notes, ...sourceNotes] as note, i (i)}<p>{note}</p>{/each}</details>{/if}
   <div class="canvas" aria-label="Review board canvas" role="group" onpointerdowncapture={startPointerSelection} onpointercancel={() => { selectingRectangle = false; rectangleBase = []; rectangleOrigin = null; }}>
     <SvelteFlow bind:nodes bind:viewport {edges} {nodeTypes} {edgeTypes} minZoom={0.15} maxZoom={1.6} nodesConnectable={false} deleteKey={[]} zoomOnDoubleClick={false} panOnDrag={[2]} panActivationKey={[]} selectionOnDrag selectionKey={[]} multiSelectionKey="Shift" selectionMode={SelectionMode.Partial} autoPanOnNodeFocus={false} proOptions={{ hideAttribution: true }}
-      onnodeclick={({ node, event }) => { if (!event.shiftKey) nodes = nodes.map((item) => ({ ...item, selected: item.id === node.id })); selected = node.type === 'symbol' ? node.id : model.targetState(node.data.symbolId, included, hidden).representative; if (node.type === 'code') nodes = nodes.map((item) => item.id === node.id ? { ...item, zIndex: ++zIndex } : item); }}
+      onnodeclick={({ node, event }) => { if (!event.shiftKey) nodes = nodes.map((item) => ({ ...item, selected: item.id === node.id })); selected = node.type === 'symbol' ? node.id : node.type === 'code' ? model.targetState(node.data.symbolId, included, hidden).representative : null; if (node.type !== 'symbol') nodes = nodes.map((item) => item.id === node.id ? { ...item, zIndex: ++zIndex } : item); }}
       onselectionstart={() => { selectingRectangle = true; }} onselectionend={finishRectangleSelection}
       onedgeclick={({ edge }) => { if (edge.data?.detachedMember) locateDetachedSource(String(edge.data.detachedMember)); else showEvidence(edge); }} onselectionchange={() => { retainRectangleSelection(); reflectSourceSelection(nodes.filter((node) => node.selected)); }} onpaneclick={() => { selected = null; evidence = null; }}>
       <Background gap={24} size={1} patternColor="var(--rule-soft)" /><Controls showLock={false} /><MiniMap pannable zoomable nodeColor={(node) => node.type === 'code' ? 'var(--press-2)' : 'var(--accent)'} />
     </SvelteFlow>
-    {#if !included.length && !codeCount}<section class="empty"><h2>Choose what you want to understand</h2><p>Add symbols from this index. Connections helps you follow only the targets you choose.</p></section>{/if}
+    {#if !included.length && !codeCount && !commentCount}<section class="empty"><h2>Choose what you want to understand</h2><p>Add symbols from this index, or add a comment to take notes. Connections helps you follow only the targets you choose.</p></section>{/if}
     {#if panel === 'library'}
       <aside class="panel library" aria-label="Symbol library"><div class="panel-heading"><h2 tabindex="-1">Add symbols</h2><button aria-label="Close symbol library" onclick={closePanel}>×</button></div>
         <div class="direction" aria-label="Selection source"><button class:active={libraryMode === 'symbols'} onclick={() => { libraryMode = 'symbols'; void search(); }}>Symbols</button><button class:active={libraryMode === 'folder'} disabled={!adapter.boardGroups} onclick={() => { libraryMode = 'folder'; groupPage = null; activeGroup = null; void groups(); }}>Folders</button><button class:active={libraryMode === 'namespace'} disabled={!adapter.boardGroups} onclick={() => { libraryMode = 'namespace'; groupPage = null; activeGroup = null; void groups(); }}>Namespaces</button></div>

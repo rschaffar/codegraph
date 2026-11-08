@@ -151,6 +151,32 @@ A large container's complete contents are not a useful default: prefer connected
 members with an explicit, counted way to page/reveal the rest. Complete support
 means no kind is excluded, not that every member is drawn immediately.
 
+### Comment cards
+
+**Add comment** creates an editable, multiline plain-text card at the visible
+canvas centre. Drag its header, resize using its handles or Size buttons, select
+and move it with symbol/source cards, or Delete it. Text editing/selection and
+scrolling do not drag the card or pan the canvas. Comment cards have no indexed
+identity, graph connections, source queries or symbol attachments.
+
+Comments are reviewer-owned board metadata, retained by explicit Save/Open and
+JSON export/import alongside their geometry and stacking order. They can be edited
+and exported in read-only mode, but that mode still refuses filesystem Save/Delete.
+New clears them with the rest of the board; edits participate in unsaved-change and
+in-flight replacement guards. Empty drafts and multiline whitespace are preserved;
+HTML/Markdown is never interpreted. There are at most 64 comments, each up to
+16,384 characters, under the existing aggregate 1 MiB board limit.
+
+The focused `scripts/check-board-comments-browser.mjs` exercises plain-text editing,
+native pointer drag/resize, Save/Open, actual JSON download/import and read-only
+in-memory changes against a throwaway index. It accepts the same artifact-root and
+installed-viewer executable settings as the other Board browser checks.
+
+The optional `comments` field extends the V1 document: older documents load without
+migration. Older viewer builds that reject unknown fields cannot open boards with
+comments. This is a narrow extension to the original no-notes scope; arbitrary
+shapes, drawn arrows, formatted text and collaborative editing remain deferred.
+
 ### Source cards
 
 Class/type source cards offer **Detach** beside each eligible indexed method
@@ -579,6 +605,6 @@ acceptance is uncertain because this deliberately departs from its current UX.
 
 Cross-project selection/linking; Git-diff seeding/graph comparison; AI-authored explanations; framework-specific
 runtime/data-flow reconstruction; collaborative editing; arbitrary drawn arrows,
-notes or diagram shapes; browser-hosted remote services; source editing; and
+diagram shapes or formatted annotations; browser-hosted remote services; source editing; and
 automatic repository changes. Static exports beyond board JSON can follow the
 core interaction work rather than delaying the reviewer workflow.

@@ -352,6 +352,38 @@ describe('board import validation without storage', () => {
   });
 });
 
+describe('board comment metadata', () => {
+  function comment() { return { key: 'n1', text: '  Notes\n\t<img src=x onerror=alert(1)>\n', position: { x: -20, y: 80 }, width: 320, height: 240, zIndex: 12 }; }
+  it('keeps legacy documents unchanged and round-trips comment-only boards through storage and resolution', () => {
+    expect(parseBoardDocument(document())).toEqual(document());
+    const doc = { ...document(), symbols: [], cards: [], comments: [comment(), { ...comment(), key: 'n2', text: '' }] };
+    expect(parseBoardDocument(doc)).toEqual(doc);
+    const saved = save('Notes', doc);
+    expect(readStoredBoard(root, saved.id)!.document).toEqual(doc);
+    const resolved = resolveBoard(cg, doc);
+    expect(resolved.board).toEqual(doc); expect(resolved.resolutions).toEqual([]);
+    expect(parseBoardDocument({ ...document(), comments: [] }).comments).toEqual([]);
+  });
+  it('bounds individual text and comment counts independently of symbols and source cards', () => {
+    const doc = { ...document(), comments: [comment()] };
+    doc.comments[0].text = 'x'.repeat(16_384);
+    expect(parseBoardDocument(doc).comments![0].text).toHaveLength(16_384);
+    doc.comments[0].text += 'x'; expect(() => parseBoardDocument(doc)).toThrow(/comment text/);
+    doc.comments = Array.from({ length: 64 }, (_, i) => ({ ...comment(), key: `n${i}` }));
+    expect(parseBoardDocument(doc).comments).toHaveLength(64);
+    doc.comments.push({ ...comment(), key: 'overflow' }); expect(() => parseBoardDocument(doc)).toThrow(/64 comment/);
+    doc.comments = Array.from({ length: 64 }, (_, i) => ({ ...comment(), key: `n${i}`, text: 'x'.repeat(16_384) }));
+    expect(() => parseBoardDocument(doc)).toThrow(/too large/);
+  });
+  it('rejects malformed, duplicate, cross-kind and unbounded comment metadata', () => {
+    const invalid: unknown[] = [null, {}, 'text', [null], [comment(), comment()], [{ ...comment(), key: 's1' }], [{ ...comment(), key: 'c1' }]];
+    for (const field of [{ text: null }, { text: 7 }, { text: '\u0000' }, { key: '../note' }, { width: 239 }, { height: 159 },
+      { width: Infinity }, { height: 4097 }, { position: { x: NaN, y: 0 } }, { position: { x: 0, y: 1_000_001 } },
+      { zIndex: -1 }, { zIndex: 1.5 }, { html: '<b>no</b>' }, { symbolKey: 's1' }]) invalid.push([{ ...comment(), ...field }]);
+    for (const comments of invalid) expect(() => parseBoardDocument({ ...document(), comments })).toThrow();
+  });
+});
+
 describe('project-local board store', () => {
   it('explicit updates preserve createdAt, Save as never overwrites a same-name board', () => {
     expect(buildBoards(root, writable)).toEqual({ boards: [], readOnly: false, readOnlyReason: null, directory: BOARDS_RELATIVE_DIR, skipped: 0, bounded: false });
@@ -728,6 +760,19 @@ describe('real loopback board HTTP boundary', () => {
     expect((await call('/api/boards/..%2fescape', { method: 'DELETE' })).status).not.toBe(200);
     expect((await call('/api/boards?projectRoot=/outside')).status).toBe(200);
     expect((await call('/api/unknown')).status).toBe(404);
+  });
+  it('saves, loads and resolves comment-only boards over HTTP, including read-only loading', async () => {
+    const doc: BoardDocument = { ...document(), symbols: [], cards: [], comments: [{ key: 'note', text: 'Personal\nnotes', position: { x: 4, y: 5 }, width: 320, height: 240, zIndex: 7 }] };
+    await mount();
+    const saved = await call('/api/boards', { method: 'POST', body: { name: 'Notes', document: doc } });
+    expect(saved.status).toBe(200);
+    expect((await call(`/api/boards/${saved.body.id}`)).body.board).toEqual(doc);
+    await server!.close(); server = undefined; await mount(readOnly);
+    const resolved = await call('/api/boards/resolve', { method: 'POST', body: { document: doc } });
+    expect(resolved.status).toBe(200); expect(resolved.body.board).toEqual(doc); expect(resolved.body.resolutions).toEqual([]);
+    expect((await call(`/api/boards/${saved.body.id}`)).body.board).toEqual(doc);
+    expect((await call('/api/boards', { method: 'POST', body: { name: 'No write', document: doc } })).status).toBe(403);
+    expect(listStoredBoards(indexRoot).boards).toHaveLength(1);
   });
   it('preserves Host, Origin, marker, content-type and no-CORS gates', async () => {
     await mount();

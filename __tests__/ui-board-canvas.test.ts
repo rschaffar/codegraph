@@ -126,6 +126,88 @@ beforeEach(() => {
 });
 afterEach(async () => { if (mounted) await unmount(mounted); host.remove(); boardRequests.take(); setGraphAdapter(null); vi.restoreAllMocks(); });
 
+describe('Board comment cards', () => {
+  function textarea() { return host.querySelector<HTMLTextAreaElement>('[aria-label="Comment text"]')!; }
+  function edit(text: string) { const field = textarea(); field.value = text; field.dispatchEvent(new Event('input', { bubbles: true })); flushSync(); }
+  function commentId() { return host.querySelector<HTMLElement>('[data-comment-card]')!.dataset.commentCard!; }
+  it('edits, moves, resizes and saves a comment-only board without indexed identities', async () => {
+    await render(); await click('+ Add comment');
+    expect(document.activeElement).toBe(textarea()); expect(host.querySelector('.empty')).toBeNull();
+    const text = '  Review this\n\t<img src=x onerror=alert(1)>\n'; edit(text);
+    expect(host.querySelector('.comment-card img')).toBeNull();
+    const id = commentId(); await moveCard(id);
+    const node = host.querySelector<HTMLElement>(`.svelte-flow__node[data-id="${id}"]`)!;
+    const position = node.style.transform;
+    for (const control of [button('Delete comment'), button('Wider'), host.querySelector('.comment-card summary')!]) {
+      (control as HTMLElement).focus(); control.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true })); await settle();
+      expect(node.style.transform).toBe(position);
+    }
+    await click('Wider'); await click('Taller');
+    input('Board name', 'Notes'); await click('Save');
+    const recipe = clone(calls.saveBoard.mock.calls.at(-1)![0].document);
+    expect(recipe.symbols).toEqual([]); expect(recipe.cards).toEqual([]);
+    expect(recipe.comments).toHaveLength(1); expect(recipe.comments![0]).toMatchObject({ text, width: 400, height: 320 });
+    expect(calls.source).not.toHaveBeenCalled(); expect(calls.nodes).not.toHaveBeenCalled(); expect(calls.board).not.toHaveBeenCalled();
+    await click('New'); expect(textarea()).toBeNull();
+    await open('Notes'); expect(textarea().value).toBe(text); await click('Save');
+    expect(calls.saveBoard.mock.calls.at(-1)![0].document.comments).toEqual(recipe.comments);
+    textarea().dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true })); await settle(); expect(textarea()).not.toBeNull();
+    const card = host.querySelector<HTMLElement>(`.svelte-flow__node[data-id="${id}"]`)!;
+    card.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true })); await settle();
+    expect(textarea()).toBeNull(); expect(document.activeElement).toBe(button('+ Add symbols'));
+    expect(host.querySelector('.savebar')?.textContent).toContain('Unsaved changes');
+  });
+  it('retains comments across graph filters and refresh without seeding graph identities', async () => {
+    await render(); await open(); await click('+ Add comment'); edit('Keep this note');
+    const id = commentId(); await click('Refresh index');
+    expect(textarea().value).toBe('Keep this note'); expect(commentId()).toBe(id);
+    const checkbox = [...host.querySelectorAll<HTMLInputElement>('input[type=checkbox]')].find((item) => item.parentElement?.textContent?.trim() === 'Tests')!;
+    checkbox.click(); await settle(); expect(textarea().value).toBe('Keep this note');
+    expect(calls.board.mock.calls.every(([ids]) => ids.every((id) => !id.startsWith('comment:')))).toBe(true);
+    await click('Delete comment'); expect(textarea()).toBeNull(); expect(host.querySelector('[data-symbol="a"]')).not.toBeNull();
+  });
+  it('keeps imported comment keys distinct from generated symbol and source keys', async () => {
+    const recipe = documentFor(a); recipe.symbols = [];
+    recipe.comments = ['s0', 'c0'].map((key) => ({ key, text: key, position: { x: 0, y: 0 }, width: 320, height: 240, zIndex: 10 }));
+    records.get('a')!.document = recipe;
+    await render(); await open(); boardRequests.enqueue(['a']); await settle(); await click('Open Alpha source'); await click('Save');
+    const saved = calls.saveBoard.mock.calls.at(-1)![0].document;
+    const keys = [...saved.symbols.map((item) => item.key), ...saved.cards.map((item) => item.key), ...saved.comments!.map((item) => item.key)];
+    expect(new Set(keys).size).toBe(keys.length); expect(saved.comments!.map((item) => item.key)).toEqual(['s0', 'c0']);
+  });
+  it('preserves edits made during pending Save and pending Open', async () => {
+    await render(); await click('+ Add comment'); edit('Before'); input('Board name', 'Notes');
+    const pendingSave = deferred<{ id: string; name: string; updatedAt: string }>(); calls.saveBoard.mockImplementationOnce(() => pendingSave.promise);
+    await click('Save'); edit('After'); pendingSave.resolve({ id: 'notes', name: 'Notes', updatedAt: 'now' }); await settle();
+    expect(host.querySelector('.savebar')?.textContent).toContain('Unsaved changes');
+    const pendingOpen = deferred<BoardLoaded>(); calls.loadBoard.mockImplementationOnce(() => pendingOpen.promise);
+    await click('Saved boards'); await click('Open Alpha review'); edit('Latest');
+    pendingOpen.resolve(loaded(documentFor(a))); await settle();
+    expect(textarea().value).toBe('Latest'); expect(host.querySelector('[data-symbol="a"]')).toBeNull();
+    expect(host.querySelector('.notice')?.textContent).toContain('newer work was preserved');
+  });
+  it('exports and imports comments as plain metadata and edits them in read-only mode', async () => {
+    calls.boards.mockResolvedValue({ boards: [], readOnly: true, readOnlyReason: 'Read-only fixture', directory: '.codegraph/ui/boards', skipped: 0, bounded: false });
+    await render(); await click('+ Add comment'); edit('Export\nthis');
+    let exported!: Blob;
+    vi.stubGlobal('URL', class extends URL { static createObjectURL(blob: Blob) { exported = blob; return 'blob:notes'; } static revokeObjectURL() {} });
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    try {
+      await click('Export JSON');
+      const text = await new Promise<string>((resolve) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.readAsText(exported); });
+      const recipe = JSON.parse(text).document as BoardDocument;
+      expect(recipe.comments![0].text).toBe('Export\nthis'); expect(recipe.symbols).toEqual([]);
+      await click('New');
+      const file = new File([text], 'notes.json', { type: 'application/json' }); Object.defineProperty(file, 'text', { value: async () => text });
+      const field = host.querySelector<HTMLInputElement>('input[type=file]')!; Object.defineProperty(field, 'files', { value: [file], configurable: true });
+      field.dispatchEvent(new Event('change', { bubbles: true })); await settle();
+      expect(textarea().value).toBe('Export\nthis'); expect(calls.resolveBoard).toHaveBeenCalledWith(recipe);
+      edit('Still editable'); expect(textarea().value).toBe('Still editable');
+      expect(button('Save').disabled).toBe(true); expect(calls.saveBoard).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
+  });
+});
+
 describe('Board pointer interactions and placement', () => {
   const bounds = { x: 100, y: 200, left: 100, top: 200, right: 1100, bottom: 900, width: 1000, height: 700, toJSON() {} };
   const view = { x: 80, y: -40, zoom: 0.8 };
@@ -188,6 +270,29 @@ describe('Board pointer interactions and placement', () => {
     expect(node('b').style.transform).not.toBe(before[0]); expect(node('code:a').style.transform).not.toBe(before[1]); expect(node('a').style.transform).toBe(before[2]);
     // d3 suppresses the click immediately following a drag until the next task.
     await settle(); await cardClick('b'); expect(selectedIds()).toEqual(['b']);
+  });
+
+  it('selects comments together with symbol/source cards and drags only the selected group', async () => {
+    await render(); await open(); await click('Open Alpha source'); await click('+ Add comment');
+    const comment = host.querySelector<HTMLElement>('[data-comment-card]')!.dataset.commentCard!;
+    await cardClick('a', true); await cardClick('code:a', true);
+    expect(selectedIds()).toEqual(['a', 'code:a', comment].sort());
+    const before = new Map(['a', 'b', 'code:a', comment].map((id) => [id, node(id).style.transform]));
+    node(comment).querySelector('header')!.dispatchEvent(mouse('mousedown', { button: 0, buttons: 1, clientX: 600, clientY: 520 }));
+    window.dispatchEvent(mouse('mousemove', { button: 0, buttons: 1, clientX: 605, clientY: 525 })); await settle();
+    window.dispatchEvent(mouse('mousemove', { button: 0, buttons: 1, clientX: 650, clientY: 545 })); await settle();
+    window.dispatchEvent(mouse('mouseup', { button: 0, clientX: 650, clientY: 545 })); await settle();
+    for (const id of ['a', 'code:a', comment]) expect(node(id).style.transform).not.toBe(before.get(id));
+    expect(node('b').style.transform).toBe(before.get('b'));
+    await cardClick(comment); expect(selectedIds()).toEqual([comment]);
+    // Editing is native text interaction, not a header drag.
+    const beforeEdit = node(comment).style.transform;
+    const field = node(comment).querySelector('textarea')!;
+    field.dispatchEvent(mouse('mousedown', { button: 0, buttons: 1, clientX: 600, clientY: 560 }));
+    window.dispatchEvent(mouse('mousemove', { button: 0, buttons: 1, clientX: 650, clientY: 590 }));
+    window.dispatchEvent(mouse('mouseup', { button: 0, clientX: 650, clientY: 590 })); await settle();
+    expect(node(comment).style.transform).toBe(beforeEdit);
+    expect((await savedState()).viewport).toEqual(view);
   });
 
   it('selects touched cards with a rectangle, adds with Shift, and clears on empty click without panning', async () => {
