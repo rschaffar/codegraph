@@ -88,7 +88,10 @@ source, using `importNpmLock` and the existing lockfile integrity hashes. First
 entry materializes writable copies of those immutable outputs; repeat entry
 reuses matching copies and a missing workspace tree is recreated. Shell entry
 runs no npm installation and copies no npm cache. Workspace links resolve to the
-editable UI sources, while the root/UI tool versions remain distinct.
+editable UI sources, and UI tools resolve from the workspace-local tree when
+present or from the root tree when npm hoists them there. A fully hoisted layout
+still has a managed physical `ui/node_modules` directory; an empty or foreign
+unmanaged directory is never adopted.
 
 Unmanaged, symlinked, incomplete or old-generation dependency trees are refused,
 not overwritten. When migrating from the old bootstrap or updating dependencies,

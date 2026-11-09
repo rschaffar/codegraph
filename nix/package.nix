@@ -50,9 +50,12 @@ stdenv.mkDerivation {
     cp -R ${dependencies.development}/node_modules ./node_modules
     cp -R ${dependencies.development}/ui/node_modules ./ui/node_modules
     chmod -R u+w node_modules ui/node_modules
-    # Keep the UI's Vite 7 separate from the root's Vite 5 test tooling.
+    # Resolve the UI's tool from its workspace, whether nested or root-hoisted.
+    vite=node_modules/vite/bin/vite.js
+    if [ ! -f "ui/$vite" ]; then vite=../node_modules/vite/bin/vite.js; fi
+    test -f "ui/$vite"
     substituteInPlace ui/package.json \
-      --replace-fail '"build": "vite build"' '"build": "node node_modules/vite/bin/vite.js build"'
+      --replace-fail '"build": "vite build"' "\"build\": \"node $vite build\""
     patchShebangs ui/node_modules
     npm run build
     runHook postBuild

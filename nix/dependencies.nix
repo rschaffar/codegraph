@@ -57,6 +57,9 @@ let
         cp package.json package-lock.json "$out/"
         cp ui/package.json "$out/ui/"
         mv node_modules "$out/"
+        # npm may hoist every workspace dependency into the root tree.
+        # Keep a physical workspace destination for the guarded shell workflow.
+        mkdir -p ui/node_modules
         mv ui/node_modules "$out/ui/"
         runHook postInstall
       '';

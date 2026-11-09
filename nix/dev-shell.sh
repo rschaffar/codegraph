@@ -39,7 +39,7 @@ _codegraphPrepareModules() {
     fi
   done
   if [ ! -x node_modules/.bin/tsc ] || [ ! -x node_modules/.bin/vitest ] ||
-     [ ! -x ui/node_modules/.bin/vite ] ||
+     { [ ! -x ui/node_modules/.bin/vite ] && [ ! -x node_modules/.bin/vite ]; } ||
      [ "$(readlink -f node_modules/@colbymchenry/codegraph-ui)" != "$(pwd -P)/ui" ]; then
     echo 'CodeGraph Nix dependencies are incomplete or the UI workspace link is not local; move the affected tree aside explicitly.' >&2
     return 1

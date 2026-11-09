@@ -44,14 +44,23 @@ in
     cd checkout
     sha256sum package.json package-lock.json ui/package.json > "$TMPDIR/manifests.sha256"
     ${prepare}
-    node -e 'const a=require("assert");const l=require("./package-lock.json");a.equal(require("./node_modules/vite/package.json").version,l.packages["node_modules/vite"].version);a.equal(require("./ui/node_modules/vite/package.json").version,l.packages["ui/node_modules/vite"].version);require.resolve("svelte-check");a.equal(require("fs").realpathSync("node_modules/@colbymchenry/codegraph-ui"),process.cwd()+"/ui")'
+    node <<'NODE'
+    const assert=require('assert/strict'), fs=require('fs'), path=require('path'), {createRequire}=require('module');
+    const lock=require('./package-lock.json');
+    const ui=createRequire(path.resolve('ui/package.json'));
+    assert.equal(require('./node_modules/vite/package.json').version,lock.packages['node_modules/vite'].version);
+    assert.equal(ui('vite/package.json').version,(lock.packages['ui/node_modules/vite']??lock.packages['node_modules/vite']).version);
+    ui.resolve('svelte-check');
+    assert.equal(fs.realpathSync('node_modules/@colbymchenry/codegraph-ui'),process.cwd()+'/ui');
+    NODE
     test ! -e .codegraph
     touch -d @1 node_modules/.codegraph-nix-modules
     ${prepare}
     test "$(stat -c %Y node_modules/.codegraph-nix-modules)" = 1
     rm -rf ui/node_modules
     ${prepare}
-    test -x ui/node_modules/.bin/vite
+    test "$(<ui/node_modules/.codegraph-nix-modules)" = '${dependencies.development}'
+    node -e 'const {createRequire}=require("module");const path=require("path");createRequire(path.resolve("ui/package.json")).resolve("vite/package.json")'
     sha256sum --check "$TMPDIR/manifests.sha256"
     # Logical checkout aliases must still resolve the UI to this physical tree.
     (cd ..; ln -s checkout checkout-alias; cd checkout-alias; ${prepare})
@@ -72,6 +81,24 @@ in
     ln -s node_modules.saved node_modules
     if ${prepare} > "$TMPDIR/symlink.log" 2>&1; then exit 1; fi
     test -L node_modules
+    # Validate all destinations before materializing even the missing root tree.
+    rm node_modules
+    mv ui/node_modules ui/node_modules.saved
+    mkdir ui/node_modules
+    if ${prepare} > "$TMPDIR/empty-workspace.log" 2>&1; then exit 1; fi
+    test ! -e node_modules
+    test ! -e ui/node_modules/.codegraph-nix-modules
+    printf 'old-generation' > ui/node_modules/.codegraph-nix-modules
+    printf 'workspace owned' > ui/node_modules/keep
+    if ${prepare} > "$TMPDIR/stale-workspace.log" 2>&1; then exit 1; fi
+    test ! -e node_modules
+    test "$(<ui/node_modules/.codegraph-nix-modules)" = old-generation
+    test "$(<ui/node_modules/keep)" = 'workspace owned'
+    mv ui/node_modules ui/old-generation-modules
+    ln -s node_modules.saved ui/node_modules
+    if ${prepare} > "$TMPDIR/symlink-workspace.log" 2>&1; then exit 1; fi
+    test -L ui/node_modules
+    test ! -e node_modules
     test ! -e .codegraph
     touch "$out"
   '';
@@ -85,7 +112,10 @@ in
       cp -R ${dependencies.development}/node_modules ./node_modules
       cp -R ${dependencies.development}/ui/node_modules ./ui/node_modules
       chmod -R u+w node_modules ui/node_modules
-      substituteInPlace ui/package.json --replace-fail '"build": "vite build"' '"build": "node node_modules/vite/bin/vite.js build"'
+      vite=node_modules/vite/bin/vite.js
+      if [ ! -f "ui/$vite" ]; then vite=../node_modules/vite/bin/vite.js; fi
+      test -f "ui/$vite"
+      substituteInPlace ui/package.json --replace-fail '"build": "vite build"' "\"build\": \"node $vite build\""
     '';
     buildPhase = ''
       export HOME="$TMPDIR/home" TERM=xterm-256color
