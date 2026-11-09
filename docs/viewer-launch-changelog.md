@@ -15,6 +15,12 @@ These describe `codegraph ui` and its screens. They were taken out of `## [Unrel
 
 ## New Features
 
+- Review Board code links center existing target source, including methods inside class cards, without detaching it or changing your zoom.
+
+- Function and method source cards offer a menu to open their containing class, type or file while keeping existing standalone sources.
+
+- Review Board connections offer Go to source and Go to target, with an exact member or reference-site choice when a connection has several destinations.
+
 - Review Board source cards can grow taller than 4,096 pixels, so you can see more code without the previous height ceiling.
 
 - Review Board no longer stops at 32 source cards, so you can compare more sources within the board’s shared identity and file-size limits.
