@@ -323,6 +323,27 @@ export class BoardGraph {
     return { facts, bounded };
   }
 
+  /** Source navigation context only: no descendants, edges or board membership. */
+  sourceContext(id: string, notes: string[]): { facts: Map<string, BoardFact>; containers: string[]; bounded: boolean } {
+    const origin = this.nodes([id]).get(id)!;
+    const files = this.db.prepare("SELECT id FROM nodes WHERE kind='file' AND file_path=? LIMIT 2")
+      .all(origin.filePath) as { id: string }[];
+    const fileId = files.length === 1 ? files[0]!.id : undefined;
+    if (files.length !== 1) notes.push('The exact source file has no unique indexed file symbol; no file source target was guessed.');
+    const context = this.facts([id, ...(fileId ? [fileId] : [])], notes);
+    const containers: string[] = []; const seen = new Set([id]);
+    let cursor = context.facts.get(id)?.ownerId;
+    while (cursor && !seen.has(cursor)) {
+      seen.add(cursor);
+      const fact = context.facts.get(cursor);
+      if (!fact) break;
+      if (siblingTypes.has(fact.node.kind)) containers.push(cursor);
+      cursor = fact.ownerId;
+    }
+    if (fileId && fileId !== id) containers.push(fileId);
+    return { ...context, containers };
+  }
+
   search(q: string, kind: string | undefined, path: string | undefined, offset: number, limit: number,
     filters: BoardViewFilters = {}, namespace?: string): { ids: string[]; total: number; excluded: BoardExcludedCounts } {
     const where: string[] = [];

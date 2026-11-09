@@ -50,6 +50,7 @@ const members = (params: Record<string, string | number>) => get('/api/board/mem
 const connections = (params: Record<string, string | number>) => get('/api/board/connections', params);
 const search = (params: Record<string, string | number> = {}) => get('/api/board/search', params);
 const siblings = (params: Record<string, string | number>) => get('/api/board/sibling-sources', params);
+const sourceContext = (id: string) => get('/api/board/source-context', { id });
 
 function endpointsResolve(body: any): void {
   const ids = new Set(body.symbols.map((s: any) => s.id));
@@ -272,6 +273,21 @@ class PythonOther:
       sb(`sb-wide-${String(i).padStart(4, '0')}`, 'method', 'sibling/wide.rs', 'overloaded', i + 1);
       edge('sb-wide-owner', `sb-wide-${String(i).padStart(4, '0')}`, 'contains');
     }
+    // Source context finds exact-file identity independently of ownership.
+    add('sc-file', 'file', 'source-context/exact.ts');
+    add('sc-outer', 'class', 'source-context/exact.ts'); add('sc-wrapper', 'namespace', 'source-context/exact.ts');
+    add('sc-inner', 'struct', 'source-context/exact.ts'); add('sc-method', 'method', 'source-context/exact.ts');
+    edge('sc-file', 'sc-outer', 'contains'); edge('sc-outer', 'sc-wrapper', 'contains');
+    edge('sc-wrapper', 'sc-inner', 'contains'); edge('sc-inner', 'sc-method', 'contains'); edge('sc-inner', 'sc-method', 'contains', 2);
+    add('sc-free', 'function', 'source-context/exact.ts');
+    add('sc-other-file', 'file', 'source-context/exact.ts.extra');
+    add('sc-partial-owner', 'class', 'source-context/other.ts'); add('sc-partial-method', 'method', 'source-context/exact.ts');
+    edge('sc-partial-owner', 'sc-partial-method', 'contains');
+    add('sc-duplicate-file-a', 'file', 'source-context/duplicate.ts'); add('sc-duplicate-file-b', 'file', 'source-context/duplicate.ts');
+    add('sc-duplicate-origin', 'function', 'source-context/duplicate.ts');
+    add('sc-ambiguous', 'method', 'source-context/exact.ts'); edge('sc-inner', 'sc-ambiguous', 'contains'); edge('sc-outer', 'sc-ambiguous', 'contains');
+    add('sc-cycle-a', 'class', 'source-context/exact.ts'); add('sc-cycle-b', 'class', 'source-context/exact.ts');
+    edge('sc-cycle-a', 'sc-cycle-b', 'contains'); edge('sc-cycle-b', 'sc-cycle-a', 'contains');
     db.prepare(`INSERT INTO unresolved_refs(from_node_id, reference_name, reference_kind, line, col)
       VALUES ('member', 'uninstalledPackage', 'calls', 15, 2)`).run();
     // Simulate an older/imported corrupt index without inventing a node.
@@ -802,6 +818,53 @@ describe('Board direct member paging and filter-aware counts', () => {
   });
 });
 
+describe('Board source navigation context', () => {
+  it('returns ordered proven enclosing types through wrappers, plus the exact file', async () => {
+    const context = await sourceContext('sc-method');
+    expect(context.symbol.id).toBe('sc-method');
+    expect(context.containers.map((item: any) => item.id)).toEqual(['sc-inner', 'sc-outer', 'sc-file']);
+    expect(context.symbols.find((item: any) => item.id === 'sc-method').ownerId).toBe('sc-inner');
+    expect(context.bounded).toBe(false);
+    expect(context).not.toHaveProperty('relations');
+  });
+  it('finds a free function’s exact file without containment or path-prefix guessing', async () => {
+    const context = await sourceContext('sc-free');
+    expect(context.containers.map((item: any) => item.id)).toEqual(['sc-file']);
+    expect(context.symbol.ownerId).toBeUndefined();
+    expect(context.symbols.some((item: any) => item.id === 'sc-other-file')).toBe(false);
+  });
+  it('keeps the origin file even when a partial type owner is declared in another file', async () => {
+    const context = await sourceContext('sc-partial-method');
+    expect(context.containers.map((item: any) => item.id)).toEqual(['sc-partial-owner', 'sc-file']);
+    expect(context.containers.at(-1).file).toBe('source-context/exact.ts');
+  });
+  it('does not guess missing or duplicate file identities', async () => {
+    const duplicate = await sourceContext('sc-duplicate-origin');
+    expect(duplicate.containers).toEqual([]); expect(duplicate.notes.join(' ')).toContain('no unique indexed file');
+    const missing = await sourceContext('unproven');
+    expect(missing.containers.map((item: any) => item.id)).toEqual(['file-owner']);
+    const noFile = await sourceContext('same-b');
+    expect(noFile.containers).toEqual([]); expect(noFile.notes.join(' ')).toContain('no unique indexed file');
+  });
+  it('withholds ambiguous/cyclic ownership but still offers a unique exact file', async () => {
+    for (const id of ['sc-ambiguous', 'sc-cycle-a']) {
+      const context = await sourceContext(id);
+      expect(context.symbol.ownerId).toBeUndefined();
+      expect(context.containers.map((item: any) => item.id)).toEqual(['sc-file']);
+    }
+    const missingParent = await sourceContext('orphan');
+    expect(missingParent.symbol.ownerId).toBeUndefined();
+    expect(missingParent.notes.join(' ')).toContain('Missing contains parent');
+  });
+  it('keeps depth limits explicit and supports genuinely extracted ownership', async () => {
+    expect((await sourceContext('sb-too-deep')).bounded).toBe(true);
+    const results = await search({ q: 'freeSecond' });
+    const origin = results.items.find((item: any) => item.name === 'freeSecond');
+    const context = await sourceContext(origin.id);
+    expect(context.containers.at(-1)).toMatchObject({ kind: 'file', file: 'src/siblings.ts' });
+  });
+});
+
 describe('Board read-only sibling source discovery', () => {
   it('uses real TypeScript and Python owners, preserving overloads and excluding local functions/other classes', async () => {
     for (const file of ['src/siblings.ts', 'src/siblings.py']) {
@@ -941,6 +1004,9 @@ describe('Board validation and read-only boundary', () => {
     ['/api/board/members', {}], ['/api/board/members', { id: 'owner', uncertain: 'true' }],
     ['/api/board/members', { id: 'owner', limit: 0 }], ['/api/board/members', { id: 'owner', offset: -1 }],
     ['/api/board/members', { id: 'owner', root: '/elsewhere' }],
+    ['/api/board/source-context', {}],
+    ['/api/board/source-context', { id: 'sc-method', root: '/elsewhere' }],
+    ['/api/board/source-context?id=sc-method&id=sc-free', {}],
     ['/api/board/sibling-sources', {}],
     ['/api/board/sibling-sources', { id: 'sb-origin', root: '/elsewhere' }],
     ['/api/board/sibling-sources', { id: 'sb-origin', offset: '-1' }],
@@ -965,6 +1031,9 @@ describe('Board validation and read-only boundary', () => {
     expect((await request('/api/board', { ids: '[]' }, 'HEAD')).status).toBe(200);
     expect((await request('/api/board/groups', { type: 'folder' }, 'HEAD')).status).toBe(200);
     expect((await request('/api/board/members', { id: 'owner' }, 'HEAD')).status).toBe(200);
+    expect((await request('/api/board/source-context', { id: 'sc-method' }, 'HEAD')).status).toBe(200);
+    expect((await request('/api/board/source-context', { id: 'not-indexed' })).status).toBe(404);
+    expect((await request('/api/board/source-context', { id: 'sc-method' }, 'POST')).status).toBe(403);
     expect((await request('/api/board/sibling-sources', { id: 'sb-origin' }, 'HEAD')).status).toBe(200);
     expect((await request('/api/board/sibling-sources', { id: 'not-indexed' })).status).toBe(404);
     expect((await request('/api/board/sibling-sources', { id: 'sb-origin' }, 'POST')).status).toBe(403);

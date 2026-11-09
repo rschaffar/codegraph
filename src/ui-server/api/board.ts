@@ -200,6 +200,23 @@ export function buildBoardSearch(cg: CodeGraph, query: URLSearchParams): BoardSe
   });
 }
 
+export interface BoardSourceContext {
+  symbol: BoardSymbol; symbols: BoardSymbol[]; containers: BoardSymbol[]; bounded: boolean; notes: string[];
+}
+
+export function buildBoardSourceContext(cg: CodeGraph, query: URLSearchParams): BoardSourceContext {
+  validate(query, ['id']);
+  const id = text(query, 'id', 2048, true);
+  const graph = new BoardGraph(cg);
+  return graph.snapshot(() => {
+    if (!graph.nodes([id]).has(id)) throw notFound('Board source target is not in this index.');
+    const notes: string[] = [];
+    const context = graph.sourceContext(id, notes);
+    return { symbol: toBoardSymbol(context.facts.get(id)!), symbols: symbols(context.facts),
+      containers: context.containers.map(owner => toBoardSymbol(context.facts.get(owner)!)), bounded: context.bounded, notes };
+  });
+}
+
 export function buildBoardSiblingSources(cg: CodeGraph, query: URLSearchParams): BoardSiblingSources {
   validate(query, ['id', 'offset', 'limit', ...filterKeys]);
   const id = text(query, 'id', 2048, true);

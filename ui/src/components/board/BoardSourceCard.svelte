@@ -6,7 +6,7 @@
   import type { CodeBlock, LineRef } from '../../lib/symbol-model';
   import type { WireSource } from '../../lib/wire';
   import type { BoardEvidence, BoardSymbol, SourceCardData } from '../../lib/board-model';
-  import type { BoardConnectionRequest, BoardExclusions } from '../../lib/board-wire';
+  import type { BoardConnectionRequest, BoardExclusions, BoardSourceContext } from '../../lib/board-wire';
   import {
     BOARD_SOURCE_TARGET_PAGE, BOARD_SOURCE_EVIDENCE_PAGE,
     boardSourceRange, boardSourceContinuation, boardSourceRefs, boardSourceWithMembers, boardSourceEvidenceComplete,
@@ -38,7 +38,39 @@
     return () => { cancelled = true; };
   });
   const visibility = $derived(data.filters);
-  const requestedLine = $derived(data.highlight);
+  const focusRequest = $derived(data.focusRequest);
+  const requestedLine = $derived(focusRequest?.line ?? data.highlight);
+  let lastFocusedRequest = -1;
+  let containerOpen = $state(false);
+  let containerContext = $state<BoardSourceContext | null>(null);
+  let containerBusy = $state(false);
+  let containerError = $state('');
+  let containerController: AbortController | null = null;
+  $effect(() => {
+    void expected; void isCollapsed; void live.indexTick; void live.diskTick;
+    containerController?.abort(); containerController = null;
+    containerOpen = false; containerContext = null; containerBusy = false; containerError = '';
+    return () => containerController?.abort();
+  });
+  function closeContainers() {
+    containerOpen = false;
+    void tick().then(() => cardEl?.querySelector<HTMLButtonElement>('[data-containing-source]')?.focus({ preventScroll: true }));
+  }
+  async function toggleContainers(event: MouseEvent) {
+    event.stopPropagation(); containerOpen = !containerOpen;
+    if (containerOpen) void tick().then(() => cardEl?.querySelector<HTMLButtonElement>('.container-menu button')?.focus({ preventScroll: true }));
+    if (!containerOpen || containerContext || !getGraphAdapter().boardSourceContext) return;
+    containerController?.abort();
+    const controller = new AbortController(); containerController = controller;
+    containerBusy = true; containerError = '';
+    try {
+      const value = await getGraphAdapter().boardSourceContext!(expected.id, controller.signal);
+      if (controller.signal.aborted) return;
+      if (!verifiedBoardSourceSymbol(expected, [value.symbol])) throw new Error('Source identity changed. Refresh the board before opening containing source.');
+      containerContext = value;
+    } catch (cause) { if (!controller.signal.aborted) containerError = message(cause); }
+    finally { if (!controller.signal.aborted) containerBusy = false; }
+  }
   const reportSourceState = $derived(data.sourceState);
   const sourceSymbolId = $derived(data.symbolId);
   const siblings = $derived(data.siblings);
@@ -74,9 +106,10 @@
   let highlight = $derived(current ? null : (localHighlight ?? requestedLine ?? null));
 
   $effect(() => {
-    void requestedLine;
+    void requestedLine; void focusRequest;
     pageFrom = null;
     localHighlight = null;
+    if (focusRequest) current = false;
   });
 
   $effect(() => {
@@ -319,14 +352,25 @@
     return () => { active = false; if (frame !== null) cancelAnimationFrame(frame); observer.disconnect(); el.removeEventListener('scroll', schedule); };
   });
 
-  // Scroll the card only, not the canvas or the document containing it.
+  // The card reveals the exact rendered row after loading/paging. Only an
+  // explicit navigation command asks the canvas to pan; ordinary reads do not.
   $effect(() => {
     const line = highlight; const value = source; const el = sourceEl; const trusted = indexed;
+    const requested = focusRequest; const command = requested?.line === line ? requested : undefined; const focused = data.focused;
     if (!trusted || !line || !value?.lines || !el) return;
     void tick().then(() => {
-      if (source !== value || highlight !== line) return;
+      if (source !== value || highlight !== line || focusRequest !== requested) return;
       const row = sourceLineElement(el, line);
-      if (row) el.scrollTop = Math.max(0, row.offsetTop - 40);
+      if (!row) return;
+      if (!command) { el.scrollTop = Math.max(0, row.offsetTop - 40); return; }
+      if (lastFocusedRequest === command.request) return;
+      const box = el.getBoundingClientRect();
+      const scale = el.offsetHeight > 0 && box.height > 0 ? box.height / el.offsetHeight : 1;
+      const rowBox = row.getBoundingClientRect();
+      el.scrollTop = Math.max(0, el.scrollTop + (rowBox.top + rowBox.height / 2 - box.top) / scale - el.clientHeight / 2);
+      const shown = row.getBoundingClientRect();
+      lastFocusedRequest = command.request;
+      focused?.(id, command.request, { x: box.left + box.width / 2, y: shown.top + shown.height / 2 });
     });
   });
 </script>
@@ -374,6 +418,10 @@
     <div class="actions nodrag nopan nokey">
       {#if data.sourceOwners?.length}<button type="button" aria-label={`Reattach source ${data.symbol.qualifiedName}`} onclick={(event) => { event.stopPropagation(); data.reattachSource?.(data.symbolId, event); }}>Reattach</button>{/if}
       {#if data.symbol.kind === 'function' || data.symbol.kind === 'method'}
+        <button type="button" data-containing-source aria-label={`Containing source for ${data.symbol.name}`} aria-expanded={containerOpen}
+          disabled={!indexed || !getGraphAdapter().boardSourceContext || !data.openContainer}
+          title={!getGraphAdapter().boardSourceContext ? 'This host does not provide containing source.' : 'Choose an enclosing class/type or the exact source file'}
+          onclick={toggleContainers}>Containing source ▾</button>
         <button type="button" aria-label={`Open sibling sources for ${data.symbol.name}`} disabled={!siblings || !siblingsAvailable || siblingsBusy}
           title={siblingsBusy ? 'Loading sibling sources…' : !siblings || !siblingsAvailable ? 'This host does not provide sibling sources.' : 'Open source cards for siblings in the indexed owner scope'}
           onclick={(event) => { void siblings?.(data.symbolId, event); }}>{siblingsBusy ? 'Opening siblings…' : 'Open sibling sources'}</button>
@@ -383,6 +431,22 @@
       <button type="button" aria-label={`Close code card ${data.symbol.name}`} onclick={() => data.close(id)}>×</button></div>
   </header>
   <div class="location nodrag nopan nokey">{data.symbol.kind} · {data.symbol.file}:{verified?.line ?? data.symbol.line}{#if owner} · in {owner.qualifiedName}{/if}{#if data.sourceOwners?.length} · source detached from {data.sourceOwners.map((item) => item.qualifiedName).join(', ')}{/if}</div>
+  {#if containerOpen}
+    <div class="container-menu nodrag nopan nowheel nokey" role="dialog" tabindex="-1" aria-label={`Containing source for ${data.symbol.qualifiedName}`}
+      onkeydown={(event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeContainers(); } }}>
+      <button type="button" aria-label="Close containing source menu" onclick={closeContainers}>Close ×</button>
+      {#if containerBusy}<p role="status">Loading containing source…</p>{/if}
+      {#if containerError}<p role="alert">{containerError}</p><button type="button" onclick={closeContainers}>Close</button>{/if}
+      {#each containerContext?.containers ?? [] as container (container.id)}
+        <button type="button" title={`${container.kind} · ${container.file}:${container.line}`}
+          onclick={(event) => { event.stopPropagation(); containerOpen = false; data.openContainer?.(container, data.symbol, event); }}>
+          Open {container.kind} source: {container.qualifiedName}<small>{container.file}:{container.line}</small>
+        </button>
+      {/each}
+      {#if containerContext && !containerContext.containers.length}<p>No proven containing source is available.</p>{/if}
+      {#each containerContext?.notes ?? [] as note}<p class="dim">{note}</p>{/each}
+    </div>
+  {/if}
   {#if !data.collapsed}
     <div class="source nodrag nopan nowheel nokey" data-source-body bind:this={sourceEl}>
       {#if verifying || loading}<p role="status">Loading source…</p>{:else if identityError || error}<p role="alert">{identityError || error}</p>{/if}
@@ -464,6 +528,9 @@
   .detached-placeholder button { color: var(--accent); text-decoration: underline; margin-left: 10px; font: inherit; }
   .actions button { font-size: 12px; }
   .location { font: 10px var(--mono); color: var(--ink-3); padding: 7px 12px; border-bottom: 1px solid var(--rule-soft); flex-shrink: 0; overflow-wrap: anywhere; }
+  .container-menu { position: absolute; z-index: 8; top: 72px; left: 10px; right: 10px; max-height: calc(100% - 80px); overflow: auto; padding: 8px; border: 1px solid var(--rule); background: var(--paper); display: flex; flex-direction: column; gap: 6px; }
+  .container-menu button { text-align: left; white-space: normal; }
+  .container-menu small { display: block; color: var(--ink-3); }
   .source { position: relative; flex: 1; min-height: 0; overflow: auto; cursor: text; user-select: text; }
   p { font-size: 12px; padding: 0 12px; line-height: 1.5; }
   a, .target-link { color: var(--accent); text-decoration: underline; }

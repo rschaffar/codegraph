@@ -48,7 +48,7 @@ import type {
 
 import type { BoardSnapshot, BoardSearchRequest, BoardSearch, BoardConnectionRequest, BoardConnections, BoardEvidencePage,
   BoardList, BoardLoaded, BoardSaved, BoardDocument, SaveBoardRequest, BoardFilters, BoardGroups, BoardGroupRequest, BoardMembers, BoardMemberRequest,
-  BoardSiblingSources, BoardSiblingSourcesRequest } from './board-wire';
+  BoardSiblingSources, BoardSiblingSourcesRequest, BoardSourceContext } from './board-wire';
 
 /* ---------------------------------------------------------------- errors -- */
 
@@ -214,6 +214,8 @@ export interface GraphAdapter {
   boardGroups?(request: BoardGroupRequest, signal?: AbortSignal): Promise<BoardGroups>;
   boardMembers?(request: BoardMemberRequest, signal?: AbortSignal): Promise<BoardMembers>;
   boardSearch?(request: BoardSearchRequest, signal?: AbortSignal): Promise<BoardSearch>;
+  /** Fresh source identity and proven containing types / exact file; no membership changes. */
+  boardSourceContext?(id: string, signal?: AbortSignal): Promise<BoardSourceContext>;
   /** Other callables in the nearest proven type, else exact-file top-level functions. Origin excluded. */
   boardSiblingSources?(request: BoardSiblingSourcesRequest, signal?: AbortSignal): Promise<BoardSiblingSources>;
   boardConnections?(request: BoardConnectionRequest, signal?: AbortSignal): Promise<BoardConnections>;
@@ -383,6 +385,7 @@ export function createHttpAdapter(options: HttpAdapterOptions = {}): GraphAdapte
     boardGroups: (request, signal) => getJson<BoardGroups>(`api/board/groups${query(boardParams(request))}`, signal),
     boardMembers: (request, signal) => getJson<BoardMembers>(`api/board/members${query(boardParams(request))}`, signal),
     boardSearch: (request, signal) => getJson<BoardSearch>(`api/board/search${query(boardParams(request))}`, signal),
+    boardSourceContext: (id, signal) => getJson<BoardSourceContext>(`api/board/source-context${query(boardParams({ id }))}`, signal),
     boardSiblingSources: (request, signal) => getJson<BoardSiblingSources>(`api/board/sibling-sources${query(boardParams(request))}`, signal),
     boardConnections: (request, signal) => getJson<BoardConnections>(`api/board/connections${query(boardParams(request))}`, signal),
     boardEvidence: (request, signal) => getJson<BoardEvidencePage>(`api/board/evidence${query(boardParams(request))}`, signal),

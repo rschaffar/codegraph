@@ -55,6 +55,10 @@ export interface BoardSourceAnchor {
 export interface SourceCardData extends CodeCardData {
   symbol: BoardSymbol; follow?: (target: BoardSymbol, line?: number, event?: MouseEvent) => void; highlight?: number | null;
   filters?: BoardFilters;
+  /** Transient navigation command; a fresh request also reveals a repeated target. */
+  focusRequest?: { line: number; request: number };
+  focused?: (id: string, request: number, point: { x: number; y: number }) => void;
+  openContainer?: (target: BoardSymbol, origin: BoardSymbol, event?: MouseEvent) => void;
   sourceAnchors?: readonly BoardSourceAnchor[];
   /** Derived from existing open source cards, not additional saved membership. */
   sourceFolds?: readonly import('./source-folds').SourceFold[];

@@ -16,9 +16,11 @@
   import { boardRequests } from '../../lib/board-requests.svelte';
   import { boardSourceRelations, boardSourceAnchors, boardSiblingSourceCapacity } from '../../lib/board-source-relations';
   import { boardSourceDetachments, boardSourceDetachTargets } from '../../lib/board-source-detachments';
+  import { boardSourceDestination, boardConnectionDestinations, type BoardConnectionDestination } from '../../lib/board-navigation';
+  import { boardSourceRange, verifiedBoardSourceSymbol } from '../../lib/board-source-model';
 
   const adapter = getGraphAdapter();
-  const { fitView, screenToFlowPosition, getIntersectingNodes } = useSvelteFlow();
+  const { fitView, setViewport, screenToFlowPosition, getIntersectingNodes } = useSvelteFlow();
   const flow = $derived(useStore());
   const nodeTypes = { symbol: BoardSymbolNode, code: BoardSourceCard, comment: BoardCommentCard };
   const edgeTypes = { relation: BoardRelationEdge };
@@ -46,6 +48,12 @@
   let locatedMember = $state<string | undefined>();
   let panel = $state<'library' | 'connections' | 'hidden' | 'boards' | null>(null);
   let evidence = $state<BoardRelation | null>(null);
+  let connectionMenu = $state<{ relation: BoardRelation; x: number; y: number; direction?: 'source' | 'target' } | null>(null);
+  let navigationController: AbortController | null = null;
+  let navigationRequest = 0;
+  let panRequest = 0;
+  const navigationSymbols = $derived([...new Map([...symbols, ...(sourceSnapshot?.symbols ?? [])].map((item) => [item.id, item])).values()]);
+  const connectionChoices = $derived(connectionMenu?.direction ? boardConnectionDestinations(connectionMenu.relation, connectionMenu.direction, navigationSymbols) : []);
   let kind = $state('');
   let structure = $state(false);
   let includeTests = $state(false);
@@ -96,7 +104,7 @@
   let pendingEvidence = $state<Record<string, number>>({});
   let importFile = $state<HTMLInputElement>(null!);
   let boardElement = $state<HTMLDivElement>(null!);
-  let returnFocus: HTMLElement | null = null;
+  let returnFocus: HTMLElement | SVGElement | null = null;
   const positions = new Map<string, { x: number; y: number }>();
   let snapshotIds = new Set<string>();
   let eligibleIds = $state<ReadonlySet<string>>(new Set());
@@ -190,12 +198,12 @@
   }
   function setPanel(next: typeof panel) {
     if (!panel && document.activeElement instanceof HTMLElement) returnFocus = document.activeElement;
-    panel = next; evidence = null;
+    panel = next; evidence = null; connectionMenu = null;
     if (next) void tick().then(() => boardElement?.querySelector<HTMLElement>('aside input:not([type=checkbox]), aside h2, aside button')?.focus());
   }
   function closePanel() {
-    panel = null; evidence = null;
-    void tick().then(() => { if (returnFocus?.isConnected) returnFocus.focus(); else boardElement?.querySelector<HTMLElement>('[data-add-symbols]')?.focus(); });
+    panel = null; evidence = null; connectionMenu = null;
+    void tick().then(() => { if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true }); else boardElement?.querySelector<HTMLElement>('[data-add-symbols]')?.focus(); });
   }
   function display(id: string) { return sourceSnapshot?.symbols.find((item) => item.id === id)?.qualifiedName ?? symbols.find((item) => item.id === id)?.qualifiedName ?? id; }
   function exclusionLabel(value?: BoardSnapshot['excluded']): string {
@@ -219,7 +227,7 @@
       graph.push({ ...old, id: item.symbol.id, type: 'symbol', position, dragHandle: '.board-drag-handle', connectable: false,
         data: { ...item, hidden, pinned: included.filter((id) => !hidden.includes(id)), expanded: expanded.includes(item.symbol.id), locatedMember, canPinMembers: true, canOpenSiblingSources: !!adapter.boardSiblingSources, siblingsBusy, related: related.representatives.has(item.symbol.id), relatedIds: related.members, act } });
     }
-    nodes = [...graph, ...nodes.filter((node) => node.type !== 'symbol').map((node) => node.type === 'code' ? { ...node, data: { ...node.data, filters, follow: followSource, resize: resizeCard, siblings: openSiblingSources, siblingsBusy, siblingsAvailable: !!adapter.boardSiblingSources, sourceState: reportSourceState } } : node)];
+    nodes = [...graph, ...nodes.filter((node) => node.type !== 'symbol').map((node) => node.type === 'code' ? { ...node, data: { ...node.data, filters, follow: followSource, focused: sourceFocused, openContainer: openContainerSource, resize: resizeCard, siblings: openSiblingSources, siblingsBusy, siblingsAvailable: !!adapter.boardSiblingSources, sourceState: reportSourceState } } : node)];
   }
   // Flow replaces selection during a marquee, even with its multi-select key held.
   function startPointerSelection(event: PointerEvent) {
@@ -317,7 +325,7 @@
     if (!selection.length) { notice = 'Select cards by their headers (Shift for several), then Fit selection.'; return; }
     await tick(); await fitView({ nodes: selection, padding: 0.25, maxZoom: 1.1, duration: 200 });
   }
-  async function locate(id: string) {
+  async function locate(id: string, preserveZoom = false) {
     const generation = epoch;
     const state = model.targetState(id, included, hidden); if (state.status !== 'visible') return;
     const owner = state.representative;
@@ -327,9 +335,14 @@
     for (const parent of reveal.path.slice(0, -1)) { await ensureMembers(parent, limits[parent] ?? 6); if (generation !== epoch) return; }
     selected = owner; refresh(); nodes = nodes.map((node) => ({ ...node, selected: node.id === owner }));
     await tick(); if (generation !== epoch) return;
-    await fitView({ nodes: [{ id: owner }], padding: 0.5, maxZoom: 1, duration: 200 });
+    const member = boardElement?.querySelector<HTMLElement>(`[data-member="${CSS.escape(id)}"] button.member-name`);
+    if (preserveZoom) {
+      const destination = member ?? boardElement?.querySelector<HTMLElement>(`.svelte-flow__node[data-id="${CSS.escape(owner)}"]`);
+      if (destination) { const box = destination.getBoundingClientRect(); centerPoint({ x: box.left + box.width / 2, y: box.top + box.height / 2 }); }
+      nodes = nodes.map((node) => node.id === owner ? { ...node, zIndex: ++zIndex } : node);
+    } else await fitView({ nodes: [{ id: owner }], padding: 0.5, maxZoom: 1, duration: 200 });
     await tick(); if (generation !== epoch) return;
-    boardElement?.querySelector<HTMLElement>(`[data-member="${CSS.escape(id)}"] button.member-name`)?.focus();
+    (member ?? boardElement?.querySelector<HTMLElement>(`.svelte-flow__node[data-id="${CSS.escape(owner)}"]`))?.focus({ preventScroll: true });
     notice = owner === id ? `Located ${display(id)}.` : `Located exact member: ${reveal.path.map(display).join(' → ')}.`;
   }
   function act(action: SymbolAction, id: string, event?: MouseEvent) {
@@ -537,11 +550,76 @@
       width: Math.max(240, Math.min(4096, (node.width ?? 320) + widthDelta)),
       height: Math.max(160, Math.min(4096, (node.height ?? 240) + heightDelta)) } : node);
   }
-  function closeCard(id: string) { nodes = nodes.filter((node) => node.id !== id); sourceHeights.delete(id); void tick().then(() => boardElement?.querySelector<HTMLElement>('[data-add-symbols]')?.focus()); }
+  function closeCard(id: string) { if (id.startsWith('code:')) stopNavigation(); nodes = nodes.filter((node) => node.id !== id); sourceHeights.delete(id); void tick().then(() => boardElement?.querySelector<HTMLElement>('[data-add-symbols]')?.focus()); }
   function resizeCard(id: string, widthDelta: number, heightDelta: number) {
     nodes = nodes.map((node) => node.id === id && node.type === 'code' ? { ...node, width: Math.max(380, Math.min(4096, (node.width ?? node.measured?.width ?? 530) + widthDelta)), height: Math.max(190, (node.height ?? node.measured?.height ?? 310) + heightDelta) } : node);
   }
-  function followSource(target: BoardSymbol, line?: number, event?: MouseEvent) { merge([target]); openCode(target.id, true, line ?? null, event); }
+  function stopNavigation() {
+    navigationController?.abort(); navigationController = null; ++navigationRequest; ++panRequest;
+    // Interrupt a pending pan before a replacement captures its fingerprint.
+    void setViewport({ ...viewport });
+    connectionMenu = null;
+  }
+  function centerPoint(point: { x: number; y: number }) {
+    const box = boardElement?.querySelector('.svelte-flow')?.getBoundingClientRect();
+    if (!box || box.width <= 0 || box.height <= 0) return;
+    const start = { ...viewport }; const generation = epoch; const pan = ++panRequest;
+    const destination = { x: start.x + box.left + box.width / 2 - point.x,
+      y: start.y + box.top + box.height / 2 - point.y, zoom: start.zoom };
+    // A restored controlled viewport can precede d3's internal transform. Sync
+    // it before animating, and use linear interpolation to keep zoom constant.
+    void setViewport(start).then(() => {
+      if (generation === epoch && pan === panRequest) void setViewport(destination, { duration: 200, interpolate: 'linear' });
+    });
+  }
+  function sourceFocused(id: string, request: number, point: { x: number; y: number }) {
+    if (request !== navigationRequest || !nodes.some((node) => node.id === id && node.type === 'code' && node.data.focusRequest?.request === request)) return;
+    centerPoint(point);
+  }
+  function followSource(target: BoardSymbol, line?: number, event?: MouseEvent) { void navigateSource(target, line, event); }
+  function openContainerSource(target: BoardSymbol, origin: BoardSymbol, event?: MouseEvent) {
+    const line = target.file === origin.file && origin.line >= target.line && origin.line <= (target.endLine ?? target.line) ? origin.line : target.line;
+    void navigateSource(target, line, event, true);
+  }
+  async function navigateSource(target: BoardSymbol, line?: number, event?: MouseEvent, exactCard = false) {
+    event?.stopPropagation();
+    navigationController?.abort(); const controller = new AbortController(); navigationController = controller;
+    const command = ++navigationRequest; const generation = epoch; const index = live.indexTick; const disk = live.diskTick;
+    const current = () => !controller.signal.aborted && command === navigationRequest && generation === epoch && index === live.indexTick && disk === live.diskTick;
+    try {
+      // Fetch identity/ownership, not a guessed source range or a cached name.
+      const context = adapter.boardSourceContext ? await adapter.boardSourceContext(target.id, controller.signal) : null;
+      const snapshot = context ? null : await adapter.board!([target.id], controller.signal, filters);
+      if (!current()) return;
+      const facts = context?.symbols ?? snapshot!.symbols;
+      const fresh = verifiedBoardSourceSymbol(target, context ? [context.symbol] : facts.filter((item) => item.id === target.id));
+      if (!fresh) { notice = 'The source target no longer resolves uniquely. No source card was opened.'; return; }
+      const focus = line != null && Number.isSafeInteger(line) && line >= fresh.line && line <= fresh.endLine! ? line : fresh.line;
+      const existingDestination = () => {
+        const cards = nodes.filter((node) => node.type === 'code').map((node) => node.data.symbol);
+        return boardSourceDestination(fresh, facts, exactCard ? cards.filter((item) => item.id === fresh.id) : cards, focus);
+      };
+      let item = existingDestination() ?? fresh; let key = `code:${item.id}`;
+      if (!nodes.some((node) => node.id === key)) {
+        const source = await adapter.source({ file: item.file, ...boardSourceRange(item, { highlight: focus }) }, controller.signal);
+        if (!current()) return;
+        if (source.file !== item.file || source.drift || source.showing !== 'indexed' || !source.lines?.length) {
+          notice = 'Target source is unavailable or changed since indexing. No source card was opened.'; return;
+        }
+        // A class/file may have been explicitly opened while source was loading.
+        // Reuse its newly available source rather than detaching a new method.
+        item = existingDestination() ?? fresh; key = `code:${item.id}`;
+      }
+      merge(facts);
+      openCode(item.id, true, focus, event);
+      if (!nodes.some((node) => node.id === key)) return;
+      nodes = nodes.map((node) => node.id === key && node.type === 'code' ? { ...node,
+        height: node.data.collapsed ? sourceHeights.get(key) ?? 310 : node.height,
+        data: { ...node.data, collapsed: false, focusRequest: { line: focus, request: command } } } : node);
+      notice = `Located source: ${fresh.qualifiedName} · ${fresh.file}:${focus}.`;
+    } catch (cause) { if (current()) { notice = 'Target source could not be opened. Existing cards were preserved.'; fail(cause); } }
+    finally { if (navigationController === controller) navigationController = null; }
+  }
   function toggleCard(id: string) {
     nodes = nodes.map((node) => {
       if (node.type !== 'code' || node.id !== id) return node;
@@ -554,24 +632,24 @@
     event?.stopPropagation();
     if (new Set([...included, ...expanded, ...hidden, ...nodes.filter((node) => node.type === 'code').map((node) => node.data.symbolId), id]).size > 128) { error = 'This board already retains 128 symbol identities. Close a source-only card or start another board.'; return; }
     const item = model.symbol(id); const key = `code:${id}`;
-    if (nodes.some((node) => node.id === key)) nodes = nodes.map((node) => node.id === key && node.type === 'code' ? { ...node, selected: true, zIndex: ++zIndex, data: { ...node.data, highlight } } : { ...node, selected: false });
+    if (nodes.some((node) => node.id === key)) nodes = nodes.map((node) => node.id === key && node.type === 'code' ? { ...node, selected: true, zIndex: ++zIndex, data: { ...node.data, highlight, focusRequest: undefined } } : { ...node, selected: false });
     else {
       nodes = [...nodes.map((node) => ({ ...node, selected: false })), { id: key, type: 'code', position: position ?? openingPosition(event), width: 530, height: 310, selected: true, zIndex: ++zIndex, dragHandle: '.board-drag-handle', connectable: false,
-        data: { symbolId: id, symbol: item, collapsed: false, highlight, filters, follow: followSource, resize: resizeCard, close: closeCard, toggle: toggleCard, read: readCard, siblings: openSiblingSources, siblingsBusy, siblingsAvailable: !!adapter.boardSiblingSources, sourceState: reportSourceState } }];
+        data: { symbolId: id, symbol: item, collapsed: false, highlight, filters, follow: followSource, focused: sourceFocused, openContainer: openContainerSource, resize: resizeCard, close: closeCard, toggle: toggleCard, read: readCard, siblings: openSiblingSources, siblingsBusy, siblingsAvailable: !!adapter.boardSiblingSources, sourceState: reportSourceState } }];
     }
     if (activate) { panel = null; evidence = null; void tick().then(() => boardElement?.querySelector<HTMLElement>(`[data-id="${CSS.escape(key)}"]`)?.focus({ preventScroll: true })); }
   }
   function detachSource(target: BoardSymbol, event?: MouseEvent) {
     // A class source-only card can expose members absent from the symbol cache.
     // Reuse normal source-card opening, including its capacity and identity guards.
-    followSource(target, undefined, event);
+    merge([target]); openCode(target.id, true, null, event);
   }
   function locateDetachedSource(id: string, event?: MouseEvent) {
     event?.stopPropagation();
     const key = `code:${id}`;
     if (!nodes.some((node) => node.id === key)) return;
-    nodes = nodes.map((node) => ({ ...node, selected: node.id === key, ...(node.id === key ? { zIndex: ++zIndex } : {}) }));
-    readCard(key);
+    const node = nodes.find((item) => item.id === key && item.type === 'code');
+    if (node?.type === 'code') followSource(node.data.symbol, undefined, event);
   }
   function reattachSource(id: string, event?: MouseEvent) {
     event?.stopPropagation(); closeCard(`code:${id}`);
@@ -632,10 +710,14 @@
     finally { if (siblingController === controller) { siblingController = null; siblingsBusy = false; refresh(); } }
   }
   async function compare(edge: BoardEvidence) {
-    // A source-only class can expose method endpoints absent from the symbol
-    // diagram's cache. Admit just the two chosen source identities, never pins.
-    merge((sourceSnapshot?.symbols ?? []).filter((item) => item.id === edge.source || item.id === edge.target));
-    openCode(edge.source, false, edge.line ?? null); openCode(edge.target, false); panel = null; evidence = null;
+    // Comparing is navigation too: reuse source already shown inside containers.
+    const origin = navigationSymbols.find((item) => item.id === edge.source);
+    const target = navigationSymbols.find((item) => item.id === edge.target);
+    panel = null; evidence = null; connectionMenu = null;
+    const generation = epoch; const command = navigationRequest + (origin ? 1 : 0);
+    if (origin) await navigateSource(origin, edge.file === origin.file ? edge.line : undefined);
+    if (generation !== epoch || navigationRequest !== command) return;
+    if (target) await navigateSource(target);
   }
   function tidy() {
     let x = 30; let y = 30; let height = 0;
@@ -647,6 +729,7 @@
   function resetBoardState() {
     ++request; ++searchRequest; ++connectionRequest; ++groupRequest; ++memberGeneration;
     siblingController?.abort(); siblingController = null; siblingsBusy = false;
+    stopNavigation();
     sourceSnapshot = null; sourceStates = {}; sourceNotes = []; sourceError = '';
     memberPages = {}; symbols = []; relations = []; included = []; hidden = []; expanded = []; limits = {}; nodes = [];
     originalIdentities.clear(); positions.clear(); sourceHeights.clear(); snapshotIds = new Set(); eligibleIds = new Set();
@@ -761,6 +844,7 @@
   }
   async function openBoard(id: string) {
     if (!adapter.loadBoard || !canReplace()) return;
+    stopNavigation();
     const token = ++epoch; const expected = fingerprint(); busy = true; pendingReplacement = { id, token };
     try {
       const value = await adapter.loadBoard(id);
@@ -799,6 +883,7 @@
   }
   async function importBoard(event: Event) {
     const file = (event.target as HTMLInputElement).files?.[0]; if (!file || !canReplace()) return;
+    stopNavigation();
     const token = ++epoch; const expected = fingerprint(); busy = true; pendingReplacement = { token };
     try {
       if (file.size > 1024 * 1024) throw new Error('Board import exceeds 1 MiB.');
@@ -808,17 +893,59 @@
       await applyLoaded(loaded, token, expected, () => { boardId = undefined; boardName = typeof value.name === 'string' ? value.name.slice(0, 120) : 'Imported board'; savedFingerprint = ''; notice = 'Imported into memory only. Save as to keep a project-local copy.'; });
     } catch (cause) { if (token === epoch) fail(cause); } finally { if (pendingReplacement?.token === token) pendingReplacement = null; importFile.value = ''; if (token === epoch) busy = false; }
   }
-  function showEvidence(edge: Edge) {
+  function showConnectionMenu(edge: Edge, event: MouseEvent | KeyboardEvent) {
     if (!edge.data?.relation) return;
-    if (!panel && !evidence && document.activeElement instanceof HTMLElement) returnFocus = document.activeElement;
-    evidence = edge.data.relation as BoardRelation; panel = null;
+    const box = boardElement?.querySelector('.canvas')?.getBoundingClientRect();
+    if (!box) return;
+    returnFocus = event.target instanceof Element ? event.target.closest<SVGElement>('.svelte-flow__edge') : null;
+    returnFocus ??= document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const target = event.target instanceof Element ? event.target.getBoundingClientRect() : box;
+    const point = event instanceof MouseEvent && event.detail > 0 ? { x: event.clientX, y: event.clientY } : { x: target.left + target.width / 2, y: target.top + target.height / 2 };
+    connectionMenu = { relation: edge.data.relation as BoardRelation, x: point.x - box.left + 8, y: point.y - box.top + 8 };
+    panel = null; evidence = null;
+    void tick().then(() => boardElement?.querySelector<HTMLElement>('[data-connection-primary]')?.focus({ preventScroll: true }));
+  }
+  function dismissConnectionMenu(event: PointerEvent) {
+    if (connectionMenu && event.target instanceof Element && !event.target.closest('[data-connection-menu]')) connectionMenu = null;
+  }
+  function chooseConnectionDirection(direction: 'source' | 'target') {
+    if (!connectionMenu) return;
+    const relation = canvasRelations.find((item) => item.id === connectionMenu!.relation.id);
+    if (!relation) { connectionMenu = null; notice = 'This connection changed. Select it again.'; return; }
+    const choices = boardConnectionDestinations(relation, direction, navigationSymbols);
+    if (choices.length === 1) jumpConnection(choices[0]!, direction);
+    else {
+      connectionMenu = { ...connectionMenu, relation, direction };
+      void tick().then(() => boardElement?.querySelector<HTMLElement>('[data-connection-choice]')?.focus({ preventScroll: true }));
+    }
+  }
+  function backConnectionMenu() {
+    if (!connectionMenu) return;
+    const direction = connectionMenu.direction;
+    connectionMenu = { ...connectionMenu, direction: undefined };
+    void tick().then(() => boardElement?.querySelector<HTMLElement>(direction === 'target' ? '[data-connection-target]' : '[data-connection-primary]')?.focus({ preventScroll: true }));
+  }
+  function jumpConnection(destination: BoardConnectionDestination, direction: 'source' | 'target') {
+    const sourceLayer = connectionMenu?.relation.source.startsWith('code:');
+    connectionMenu = null; panel = null; evidence = null;
+    if (sourceLayer) followSource(destination.symbol, direction === 'source' ? destination.line : undefined);
+    else { stopNavigation(); void locate(destination.symbol.id, true); }
+  }
+  function showEvidence(relation: BoardRelation) {
+    if (!panel && !evidence && !connectionMenu && document.activeElement instanceof HTMLElement) returnFocus = document.activeElement;
+    evidence = relation; panel = null; connectionMenu = null;
     void tick().then(() => boardElement?.querySelector<HTMLElement>('[aria-label="Relationship evidence"] h2')?.focus());
   }
   function beforeUnload(event: BeforeUnloadEvent) { if (dirty) { event.preventDefault(); event.returnValue = ''; } }
   function onkeydown(event: KeyboardEvent) {
-    if (!(event.target instanceof HTMLElement) || !boardElement?.contains(event.target) || boardElement.closest('[hidden]')) return;
+    if (!(event.target instanceof Element) || !boardElement?.contains(event.target) || boardElement.closest('[hidden]')) return;
+    const arrow = event.target.closest('.svelte-flow__edge');
+    if (arrow && (event.key === 'Enter' || event.key === ' ')) {
+      const edge = edges.find((item) => item.id === arrow.getAttribute('data-id'));
+      if (edge?.data?.relation) { event.preventDefault(); event.stopPropagation(); showConnectionMenu(edge, event); return; }
+    }
     const typing = event.target.closest('input,select,textarea,[contenteditable=true]');
-    if (event.key === 'Escape' && (panel || evidence || helpOpen)) { event.preventDefault(); event.stopPropagation(); helpOpen = false; closePanel(); return; }
+    if (event.key === 'Escape' && (panel || evidence || helpOpen || connectionMenu)) { event.preventDefault(); event.stopPropagation(); helpOpen = false; closePanel(); return; }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); event.stopPropagation(); if (!busy && !saving) void save(); return; }
     if (typing) return;
     if (event.altKey) {
@@ -833,6 +960,7 @@
   }
   async function refreshIndex() {
     if (!adapter.resolveBoard || !documentState().symbols.length) return;
+    stopNavigation();
     const token = ++epoch; const expected = fingerprint(); const wasDirty = dirty; busy = true; pendingReplacement = { id: boardId, token };
     try {
       const loaded = await adapter.resolveBoard(documentState());
@@ -841,10 +969,10 @@
   }
   let seenIndex = live.indexTick;
   $effect(() => { const value = live.indexTick; if (value !== seenIndex) { seenIndex = value; untrack(() => { void refreshIndex(); }); } });
-  onMount(() => { void listBoards(); savedFingerprint = fingerprint(); return () => { siblingController?.abort(); }; });
+  onMount(() => { void listBoards(); savedFingerprint = fingerprint(); return () => { siblingController?.abort(); navigationController?.abort(); }; });
 </script>
 
-<svelte:window onbeforeunload={beforeUnload} {onkeydown} />
+<svelte:window onbeforeunload={beforeUnload} {onkeydown} onpointerdown={dismissConnectionMenu} />
 {#if !adapter.board || !adapter.boardSearch || !adapter.boardConnections}
   <p class="unavailable">This host does not provide Review Board graph queries.</p>
 {:else}
@@ -869,7 +997,7 @@
     <SvelteFlow bind:nodes bind:viewport {edges} {nodeTypes} {edgeTypes} minZoom={0.15} maxZoom={1.6} nodesConnectable={false} deleteKey={[]} zoomOnDoubleClick={false} panOnDrag={[2]} panActivationKey={[]} selectionOnDrag selectionKey={[]} multiSelectionKey="Shift" selectionMode={SelectionMode.Partial} autoPanOnNodeFocus={false} proOptions={{ hideAttribution: true }}
       onnodeclick={({ node, event }) => { if (!event.shiftKey) nodes = nodes.map((item) => ({ ...item, selected: item.id === node.id })); selected = node.type === 'symbol' ? node.id : node.type === 'code' ? model.targetState(node.data.symbolId, included, hidden).representative : null; if (node.type !== 'symbol') nodes = nodes.map((item) => item.id === node.id ? { ...item, zIndex: ++zIndex } : item); }}
       onselectionstart={() => { selectingRectangle = true; }} onselectionend={finishRectangleSelection}
-      onedgeclick={({ edge }) => { if (edge.data?.detachedMember) locateDetachedSource(String(edge.data.detachedMember)); else showEvidence(edge); }} onselectionchange={() => { retainRectangleSelection(); reflectSourceSelection(nodes.filter((node) => node.selected)); }} onpaneclick={() => { selected = null; evidence = null; }}>
+      onedgeclick={({ edge, event }) => { if (edge.data?.detachedMember) locateDetachedSource(String(edge.data.detachedMember)); else showConnectionMenu(edge, event); }} onselectionchange={() => { retainRectangleSelection(); reflectSourceSelection(nodes.filter((node) => node.selected)); }} onpaneclick={() => { selected = null; evidence = null; }}>
       <Background gap={24} size={1} patternColor="var(--rule-soft)" /><Controls showLock={false} /><MiniMap pannable zoomable nodeColor={(node) => node.type === 'code' ? 'var(--press-2)' : 'var(--accent)'} />
     </SvelteFlow>
     {#if !included.length && !codeCount && !commentCount}<section class="empty"><h2>Choose what you want to understand</h2><p>Add symbols from this index, or add a comment to take notes. Connections helps you follow only the targets you choose.</p></section>{/if}
@@ -910,6 +1038,25 @@
     {:else if panel === 'boards'}
       <aside class="panel" aria-label="Saved boards"><div class="panel-heading"><h2 tabindex="-1">Saved boards</h2><button onclick={closePanel} aria-label="Close saved boards">×</button></div><p class="hint">{boardList?.directory ?? '.codegraph/ui/boards/'} · {boardList?.skipped ?? 0} unreadable files skipped{boardList?.bounded ? ' · list bounded' : ''}</p><div class="result-list">{#each boardList?.boards ?? [] as item}<section class="result"><strong>{item.name}</strong><small>{item.updatedAt}</small><div class="row-actions"><button disabled={!adapter.loadBoard} onclick={() => openBoard(item.id)}>Open {item.name}</button><button disabled={readOnly || !adapter.deleteBoard || deletingIds.includes(item.id)} onclick={() => removeBoard(item.id)}>{deletingIds.includes(item.id) ? 'Deleting…' : 'Delete'}</button></div></section>{:else}<p class="hint">No saved boards.</p>{/each}</div></aside>
     {/if}
+    {#if connectionMenu}
+      <div class="connection-menu nodrag nopan nowheel nokey" data-connection-menu role="dialog" aria-label="Connection navigation" tabindex="-1"
+        style={`left:clamp(8px, ${connectionMenu.x}px, max(8px, calc(100% - 320px)));top:clamp(8px, ${connectionMenu.y}px, max(8px, calc(100% - 280px)))`}>
+        <div class="row-actions"><strong>{relationLabel(connectionMenu.relation.kind)}</strong><button onclick={closePanel} aria-label="Close connection navigation">×</button></div>
+        {#if connectionMenu.direction}
+          <p>Choose exact {connectionMenu.direction === 'source' ? 'source member / site' : 'target member'}:</p>
+          {#each connectionChoices as destination}
+            <button data-connection-choice onclick={() => jumpConnection(destination, connectionMenu!.direction!)}>
+              {destination.symbol.qualifiedName}<small>{destination.file}:{destination.line ?? destination.symbol.line}{destination.col == null ? '' : ` · column ${destination.col + 1}`}{connectionMenu.direction === 'source' && destination.line == null ? ' · declaration; no indexed reference location' : ''}</small>
+            </button>
+          {:else}<p>No resolved destination is available.</p>{/each}
+          <button onclick={backConnectionMenu}>Back</button>
+        {:else}
+          <button data-connection-primary onclick={() => chooseConnectionDirection('source')}>Go to source</button>
+          <button data-connection-target onclick={() => chooseConnectionDirection('target')}>Go to target</button>
+        {/if}
+        <button onclick={() => { if (connectionMenu) showEvidence(connectionMenu.relation); }}>Inspect evidence</button>
+      </div>
+    {/if}
     {#if evidence}<aside class="panel" aria-label="Relationship evidence"><div class="panel-heading"><h2 tabindex="-1">{relationLabel(evidence.kind)}</h2><button onclick={closePanel} aria-label="Close relationship evidence">×</button></div><p class="hint">{evidence.evidence.length} shown indexed edges. Browse Connections for full paged evidence when this projection is bounded.</p><div class="result-list">{#each evidence.evidence as edge (edge.id)}<section class="result"><strong>{display(edge.source)}</strong><span>→ {relationLabel(edge.kind)} →</span><strong>{display(edge.target)}</strong><small>{edge.file ?? ''}:{edge.line ?? ''} · {edge.provenance ?? 'unspecified'} · {edge.confidence ?? 'confidence unspecified'}</small>{#if edge.via || edge.synthesizedBy}<p>{edge.via ?? edge.synthesizedBy} {edge.registeredAt ?? ''}</p>{/if}<button onclick={() => compare(edge)}>Compare source ↗</button></section>{/each}</div></aside>{/if}
     <div class="notice" role="status">{busy ? 'Loading board…' : notice}</div>
   </div>
@@ -940,6 +1087,10 @@
   .file-input { display: none; }
   input[type=checkbox] { accent-color: var(--accent); }
   .canvas { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+  .connection-menu { position: absolute; z-index: 30; width: min(304px, calc(100% - 16px)); max-height: calc(100% - 16px); overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--rule); background: var(--paper); box-shadow: 0 3px 12px #0002; }
+  .connection-menu button { text-align: left; }
+  .connection-menu small { display: block; }
+  .connection-menu .row-actions { justify-content: space-between; align-items: center; }
   .panel { position: absolute; z-index: 20; right: 14px; top: 12px; bottom: 45px; width: min(390px, calc(100% - 28px)); display: flex; flex-direction: column; background: var(--paper); border: 1px solid var(--rule); overflow: hidden; }
   .panel > :not(.result-list) { flex-shrink: 0; }
   .library { left: 14px; right: auto; }

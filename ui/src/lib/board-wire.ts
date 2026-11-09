@@ -7,6 +7,9 @@ export interface BoardSnapshot {
   symbols: BoardSymbol[]; relations: BoardEvidence[]; included: string[]; missing: string[]; scopeIds?: string[];
   bounded: boolean; notes: string[]; nodeKinds: string[]; edgeKinds: string[]; excluded?: BoardExclusions;
 }
+export interface BoardSourceContext {
+  symbol: BoardSymbol; symbols: BoardSymbol[]; containers: BoardSymbol[]; bounded: boolean; notes: string[];
+}
 export interface BoardSearchRequest extends BoardFilters { q?: string; kind?: string; path?: string; namespace?: string; offset?: number; limit?: number }
 export interface BoardGroupRequest extends BoardFilters { type: 'folder' | 'namespace'; q?: string; offset?: number; limit?: number }
 export interface BoardGroups { items: Array<{ id: string; name: string; type: 'folder' | 'namespace'; path?: string; namespace?: string; total: number; byKind: Array<{ kind: string; count: number }> }>; total: number; nextOffset: number | null; bounded: boolean; notes: string[]; excluded?: BoardExclusions }

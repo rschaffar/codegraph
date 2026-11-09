@@ -135,9 +135,13 @@ Evidence counts are indexed relationships/sites, never runtime execution frequen
   ordinary edge handles. Locate opens the proven ownership path and highlights
   the exact nested member, without materializing every preceding sibling. The
   breadcrumb names that path; ambiguous ownership is not guessed.
-- Clicking an aggregate edge opens supporting original relationships, endpoint
-  member identities, source locations when present and provenance. Source can
-  open in a card or the existing Symbol/File view, with a route back to the board.
+- Clicking a connection opens a nearby **Go to source / Go to target / Inspect
+  evidence** menu; Enter/Space on a focused arrow opens the same menu. Source-card
+  arrows reveal the original reference site or target declaration in source;
+  symbol arrows locate the existing graph endpoint/member outline. Choose the
+  exact member/site first when that direction has several distinct destinations.
+  Both keep the current zoom and card placement. Inspect evidence retains the
+  original endpoint identities, locations/provenance and **Compare source**.
 - Right-button drag on empty canvas pans; starting on a card does not pan.
   Left-button drag on empty canvas draws an unfilled outline and selects every
   enclosed or touched card; Shift adds to the selection. The outline disappears
@@ -197,7 +201,8 @@ to the method card's header, distinct from indexed relationship arrows and never
 presented as a new graph edge. A containing outer type can show the same proven
 source-ownership path. Detailed indexed arrows prefer the method card even while
 it is collapsed/loading; they must not fall back into the folded class body.
-**Locate** raises/fits the existing method card. **Reattach** closes that separate
+**Locate** raises, expands and centers the existing method source at the current
+zoom. **Reattach** closes that separate
 source card and restores its body in every open containing type source. Closing
 the method card normally has the same effect. Neither action changes symbol pins.
 Folds require current verified indexed source; drift/current-file reading drops
@@ -209,9 +214,15 @@ Move, resize, collapse, close and bring to front independently; scrolling a
 card scrolls its source, not the board. Source-card height has no fixed ceiling:
 drag handles and Size controls can grow cards beyond 4,096 pixels, and Save/Open
 retains that height even when collapsed. Heights must remain finite; width and
-comment-card limits are unchanged. Code links can open another card rather than
-replacing the entire scene. Reopening an existing source card selects and
-raises it without moving it or the viewport, even when it is off-screen. Selecting
+comment-card limits are unchanged. Source-code links first reuse the target's
+own source card, otherwise its nearest proven containing class/type/file source.
+Navigation raises/expands the existing card, scrolls/highlights the target and
+centers that code without changing zoom, card positions/sizes or detachments.
+If no existing source represents the target, open a source-only card only after
+verifying its indexed identity and readable indexed bytes; missing/ambiguous or
+unavailable targets do not create blank cards. Repeated activation reveals the
+same target again, including on another source page. Explicit **Source** opening
+still selects/raises an existing card without moving it or the viewport. Selecting
 a card highlights the related graph symbol/evidence on the diagram. A fit/read action makes a card readable after
 zooming out.
 
@@ -222,6 +233,16 @@ methods of unrelated types are not file siblings. Discovery respects the Board
 filters, does not pin symbols, reuses existing source cards and preserves their
 positions and the viewport. Source cards have no separate count cap; the entire
 batch must fit the shared 128-retained-identity limit or no partial batch is opened.
+
+**Containing source** on a standalone function/method source card lists its
+proven enclosing classes/types and the exact indexed source file. Choosing a
+scope opens/reuses that source card and centers the originating declaration when
+it belongs to the selected source range. Keep existing standalone sources and
+their automatic class folds; do not reattach, close them or pin graph symbols.
+This is separate from **Open sibling sources**. The optional source-context
+adapter queries identity/ancestry only, with independent unique exact-file lookup;
+ambiguous, missing or bounded ownership is not guessed. Older hosts without that
+capability explain/disable the menu and retain normal source-link navigation.
 
 Source cards have their own typed relationship layer, never connections to symbol
 cards. Only relationships originating in a callable (including its parameters or
@@ -252,6 +273,11 @@ token targets and changed source still withhold inline precision. The focused
 pages, class/file siblings and the independent arrow layers against a throwaway
 real index; `CODEGRAPH_BOARD_EXECUTABLE` can select an installed Nix viewer and
 `CODEGRAPH_BOARD_ARTIFACT_ROOT` keeps evidence in a chosen task directory.
+The companion `scripts/check-board-navigation-browser.mjs` validates contained
+and standalone destinations, paged source centering, per-frame constant zoom,
+connection menus/exact graph-member choice and class/file materialization against
+a throwaway real index. Both browser checks passed on x86_64 Linux with managed
+Chromium for this navigation change; other-platform qualifications below remain.
 
 Fetch source on demand through the existing source API and reuse syntax
 classification and highlighting. Show current disk source with the existing

@@ -51,6 +51,20 @@ function mocks() {
     boardSearch: vi.fn(async () => ({ items: clone(facts), symbols: clone(facts), total: facts.length, nextOffset: null, bounded: false })),
     boardConnections: vi.fn(async (request: BoardConnectionRequest) => connections(request)),
     boardEvidence: vi.fn(async (_request: BoardConnectionRequest) => ({ symbols: clone(facts), items: [{ ...edge, id: 'reference-two' }], total: 2, nextOffset: null, bounded: false, notes: [] })),
+    boardSourceContext: vi.fn(async (id: string) => {
+      const symbol = facts.find((item) => item.id === id);
+      if (!symbol) throw new Error('Source target is not in the index.');
+      const containers: BoardSymbol[] = []; const seen = new Set([id]);
+      let ownerId = symbol.ownerId;
+      while (ownerId && !seen.has(ownerId)) {
+        seen.add(ownerId); const owner = facts.find((item) => item.id === ownerId); if (!owner) break;
+        if (['class', 'struct', 'interface', 'trait', 'protocol', 'enum', 'union', 'type_alias'].includes(owner.kind)) containers.push(owner);
+        ownerId = owner.ownerId;
+      }
+      const files = facts.filter((item) => item.kind === 'file' && item.file === symbol.file);
+      if (files.length === 1) containers.push(files[0]);
+      return { symbol: clone(symbol), symbols: clone(facts), containers: clone(containers), bounded: false, notes: [] };
+    }),
     boardSiblingSources: vi.fn(async (request: { id: string }) => {
       const origin = facts.find((item) => item.id === request.id)!;
       const items = facts.filter((item) => item.id !== origin.id && item.kind === origin.kind && item.ownerId === origin.ownerId && item.file === origin.file);
@@ -533,6 +547,190 @@ describe('Board relationship rendering', () => {
     expect(host.querySelector('[data-code-card="m0"]')).toBeNull();
   });
 
+  function navigationSourceBoard(withOwnCard = false) {
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(530);
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(310);
+    const recipe = legacyDetachedBoard(true);
+    if (!withOwnCard) recipe.cards = recipe.cards.filter((card) => card.symbolKey !== 'method');
+    recipe.viewport = { x: 80, y: -40, zoom: 0.8 }; records.get('a')!.document = recipe;
+    calls.boardConnections.mockImplementation(async (request) => {
+      const scope = facts.find((item) => item.id === request.id)!;
+      const evidence = { ...edge, source: b.id, target: children[0].id, file: b.file, line: 2 };
+      return { scope, symbols: clone(facts), direction: request.direction, withMembers: request.members,
+        items: request.id === b.id ? [{ target: clone(facts.find((item) => item.id === children[0].id)!), evidence: [evidence], total: 1 }] : [],
+        total: request.id === b.id ? 1 : 0, nextOffset: null, bounded: false, notes: [], excluded: noExclusions };
+    });
+    return recipe;
+  }
+  async function followMethodToken() {
+    const token = host.querySelector<HTMLElement>('[data-code-card="b"] .source [role="link"]')!;
+    expect(token).not.toBeNull(); token.click(); await settle();
+  }
+  async function savedNavigationState() { await click('Save'); return calls.saveBoard.mock.calls.at(-1)![0].document; }
+
+  it('follows an inline token into its existing class source without detaching, and repeats the same jump', async () => {
+    const before = navigationSourceBoard(); await render(); await open();
+    await followMethodToken();
+    await vi.waitFor(() => expect(host.querySelector('[data-code-card="a"] [data-line="2"].hot')).not.toBeNull());
+    expect(host.querySelector('[data-code-card="m0"]')).toBeNull();
+    expect(host.querySelector('[data-source-fold]')).toBeNull();
+    expect(host.querySelectorAll('[data-code-card]')).toHaveLength(2);
+    const saved = await savedNavigationState();
+    expect(saved.viewport.zoom).toBeCloseTo(0.8, 12);
+    expect(saved.cards.map((card) => [card.position, card.width, card.height])).toEqual(before.cards.map((card) => [card.position, card.width, card.height]));
+    expect(saved.symbols.filter((item) => item.included)).toHaveLength(1);
+    await followMethodToken(); expect(host.querySelector('[data-code-card="m0"]')).toBeNull();
+    expect(calls.boardSourceContext.mock.calls.filter(([id]) => id === 'm0')).toHaveLength(2);
+  });
+
+  it('prefers an existing standalone target, expands it, and preserves the class detachment', async () => {
+    const before = navigationSourceBoard(true); before.cards.find((card) => card.symbolKey === 'method')!.collapsed = true;
+    await render(); await open(); await followMethodToken();
+    await vi.waitFor(() => expect(host.querySelector('[data-code-card="m0"] [data-line="2"].hot')).not.toBeNull());
+    expect(host.querySelector('[data-code-card="a"] [data-source-fold="m0"]')).not.toBeNull();
+    expect(host.querySelectorAll('[data-code-card]')).toHaveLength(3);
+    const saved = await savedNavigationState();
+    expect(saved.cards.find((card) => card.symbolKey === saved.symbols.find((item) => item.identity.id === 'm0')!.key)).toMatchObject({ collapsed: false, height: 310, position: { x: 800, y: 170 } });
+    expect(saved.viewport.zoom).toBeCloseTo(0.8, 12);
+  });
+
+  it('opens the selected containing class and file without closing standalone methods or pinning sources', async () => {
+    const recipe = legacyDetachedBoard(); recipe.cards = recipe.cards.slice(1); records.get('a')!.document = recipe;
+    const file: BoardSymbol = { ...a, id: 'file-a', kind: 'file', name: a.file, qualifiedName: a.file };
+    facts.push(file);
+    await render(); await open();
+    await click('Containing source for member0');
+    expect(host.querySelector('.container-menu')?.textContent).toContain('Open class source: Alpha');
+    expect(host.querySelector('.container-menu')?.textContent).toContain('Open file source: a.ts');
+    expect(document.activeElement).toBe(button('Close containing source menu'));
+    document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); await settle();
+    expect(host.querySelector('.container-menu')).toBeNull(); expect(document.activeElement).toBe(button('Containing source for member0'));
+    await click('Containing source for member0');
+    [...host.querySelectorAll<HTMLButtonElement>('.container-menu button')].find((item) => item.textContent.includes('Open class source: Alpha'))!.click(); await settle();
+    expect(host.querySelector('[data-code-card="m0"]')).not.toBeNull();
+    await vi.waitFor(() => expect(host.querySelector('[data-code-card="a"] [data-source-fold="m0"]')).not.toBeNull());
+    await click('Containing source for member0');
+    [...host.querySelectorAll<HTMLButtonElement>('.container-menu button')].find((item) => item.textContent.includes('Open file source: a.ts'))!.click(); await settle();
+    expect(host.querySelector('[data-code-card="file-a"]')).not.toBeNull();
+    expect(host.querySelectorAll('.svelte-flow__node-symbol')).toHaveLength(1);
+    await click('Containing source for member0');
+    [...host.querySelectorAll<HTMLButtonElement>('.container-menu button')].find((item) => item.textContent.includes('Open class source: Alpha'))!.click(); await settle();
+    expect(host.querySelectorAll('[data-code-card]')).toHaveLength(3);
+    const saved = await savedNavigationState();
+    expect(saved.cards.find((card) => card.symbolKey === saved.symbols.find((item) => item.identity.id === 'm0')!.key)!.position).toEqual({ x: 800, y: 170 });
+  });
+
+  it('does not create a source card for missing/changed targets or unavailable bytes', async () => {
+    await render(); await open(); await click('Open Alpha source');
+    calls.boardSourceContext.mockRejectedValueOnce(new Error('Source target is not in the index.'));
+    host.querySelector<HTMLButtonElement>('.target-link')!.click(); await settle();
+    expect(host.querySelector('[data-code-card="b"]')).toBeNull();
+    calls.source.mockResolvedValueOnce({ file: b.file, language: 'typescript', drift: true, showing: 'none', contentHash: 'changed', indexedAt: 1, generated: false, totalLines: 100, from: 2, to: 2, lines: [] });
+    host.querySelector<HTMLButtonElement>('.target-link')!.click(); await settle();
+    expect(host.querySelector('[data-code-card="b"]')).toBeNull();
+    expect(host.querySelector('.notice')?.textContent).toContain('No source card was opened');
+  });
+
+  it('ignores a source-context response arriving after New replaces the board', async () => {
+    await render(); await open(); await click('Open Alpha source');
+    const pending = deferred<Awaited<ReturnType<typeof calls.boardSourceContext>>>();
+    calls.boardSourceContext.mockImplementationOnce(() => pending.promise);
+    host.querySelector<HTMLButtonElement>('.target-link')!.click(); await settle(); await click('New');
+    pending.resolve({ symbol: b, symbols: clone(facts), containers: [], bounded: false, notes: [] }); await settle();
+    expect(host.querySelector('[data-code-card]')).toBeNull(); expect(host.querySelector('[data-symbol]')).toBeNull();
+  });
+
+  it('reuses containing source with older hosts that lack the optional source-context capability', async () => {
+    navigationSourceBoard(); setGraphAdapter({ ...calls, boardSourceContext: undefined } as unknown as GraphAdapter);
+    await render(); await open(); await followMethodToken();
+    expect(host.querySelector('[data-code-card="a"] [data-line="2"].hot')).not.toBeNull();
+    expect(host.querySelector('[data-code-card="m0"]')).toBeNull();
+  });
+
+  it('does not resurrect a source card closed while its navigation proof is pending', async () => {
+    navigationSourceBoard(); await render(); await open();
+    const pending = deferred<Awaited<ReturnType<typeof calls.boardSourceContext>>>();
+    calls.boardSourceContext.mockImplementationOnce(() => pending.promise);
+    await followMethodToken(); await click('Close code card Alpha');
+    pending.resolve({ symbol: facts.find((item) => item.id === 'm0')!, symbols: clone(facts), containers: [a], bounded: false, notes: [] }); await settle();
+    expect(host.querySelector('[data-code-card="a"]')).toBeNull(); expect(host.querySelector('[data-code-card="m0"]')).toBeNull();
+  });
+
+  it('rechecks existing containers after a new-source preflight instead of detaching into a class opened meanwhile', async () => {
+    const recipe = navigationSourceBoard(); recipe.cards = recipe.cards.filter((card) => card.symbolKey === 'target');
+    await render(); await open();
+    const pending = deferred<Awaited<ReturnType<typeof calls.source>>>();
+    calls.source.mockImplementationOnce(() => pending.promise);
+    await followMethodToken(); await click('Open Alpha source');
+    pending.resolve({ file: a.file, language: 'typescript', drift: false, showing: 'indexed', contentHash: 'matching', indexedAt: 1, generated: false, totalLines: 100, from: 2, to: 5, lines: ['member0() {', 'return 1;', '}'] }); await settle();
+    expect(host.querySelector('[data-code-card="a"]')).not.toBeNull();
+    expect(host.querySelector('[data-code-card="m0"]')).toBeNull(); expect(host.querySelector('[data-source-fold]')).toBeNull();
+  });
+
+  it('does not finish a pending comparison by adding its target into a replacement board', async () => {
+    navigationSourceBoard(); await render(); await open();
+    const arrow = host.querySelector<SVGElement>('.svelte-flow__edge[data-id^="source-relation:"]')!;
+    arrow.dispatchEvent(new MouseEvent('click', { bubbles: true })); await settle(); await click('Inspect evidence');
+    const pending = deferred<Awaited<ReturnType<typeof calls.boardSourceContext>>>();
+    calls.boardSourceContext.mockImplementationOnce(() => pending.promise);
+    await click('Compare source ↗'); await click('New');
+    pending.resolve({ symbol: facts.find((item) => item.id === 'm0')!, symbols: clone(facts), containers: [a], bounded: false, notes: [] }); await settle();
+    expect(host.querySelector('[data-code-card]')).toBeNull(); expect(host.querySelector('[data-symbol]')).toBeNull();
+    expect(calls.boardSourceContext).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers a connection popup and jumps to exact source/target lines without creating detached cards', async () => {
+    navigationSourceBoard(); await render(); await open();
+    const arrow = () => host.querySelector<SVGElement>('.svelte-flow__edge[data-id^="source-relation:"]')!;
+    await vi.waitFor(() => expect(arrow()).not.toBeNull());
+    arrow().dispatchEvent(new MouseEvent('click', { bubbles: true })); await settle();
+    expect(host.querySelector('[aria-label="Connection navigation"]')).not.toBeNull();
+    expect(host.querySelector('[aria-label="Relationship evidence"]')).toBeNull();
+    expect(document.activeElement).toBe(button('Go to source'));
+    await click('Go to source');
+    await vi.waitFor(() => expect(host.querySelector('[data-code-card="a"] [data-line="3"].hot')).not.toBeNull());
+    expect(host.querySelector('[data-code-card="m0"]')).toBeNull();
+    await vi.waitFor(() => expect(arrow()).not.toBeNull());
+    arrow().dispatchEvent(new MouseEvent('click', { bubbles: true })); await settle(); await click('Go to target');
+    await vi.waitFor(() => expect(host.querySelector('[data-code-card="b"] [data-line="2"].hot')).not.toBeNull());
+    expect((await savedNavigationState()).viewport.zoom).toBeCloseTo(0.8, 12);
+  });
+
+  it('supports keyboard arrow activation and Escape returns focus to the arrow', async () => {
+    navigationSourceBoard(); await render(); await open();
+    const arrow = host.querySelector<SVGElement>('.svelte-flow__edge[data-id^="source-relation:"]')!;
+    expect(arrow).not.toBeNull(); arrow.focus();
+    arrow.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); await settle();
+    expect(document.activeElement).toBe(button('Go to source'));
+    document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); await settle();
+    expect(host.querySelector('[aria-label="Connection navigation"]')).toBeNull(); expect(document.activeElement).toBe(arrow);
+  });
+
+  it('requires an exact grouped member choice and stays within the symbol layer', async () => {
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(286);
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(160);
+    calls.board.mockImplementation(async (ids) => ({ ...snapshot(ids), relations: [
+      { ...edge, source: children[0].id, kind: 'calls', line: children[0].line },
+      { ...edge, id: 'second-member', source: children[1].id, kind: 'calls', line: children[1].line },
+    ] }));
+    await render(); boardRequests.enqueue(['a', 'b']); await settle();
+    const arrow = () => host.querySelector<SVGElement>('.svelte-flow__edge')!;
+    await vi.waitFor(() => expect(arrow()).not.toBeNull());
+    arrow().dispatchEvent(new MouseEvent('click', { bubbles: true })); await settle(); await click('Go to source');
+    expect(host.querySelectorAll('[data-connection-choice]')).toHaveLength(2);
+    expect(host.querySelector('[data-member="m1"]')).toBeNull();
+    await click('Back'); expect(document.activeElement).toBe(button('Go to source')); await click('Go to source');
+    [...host.querySelectorAll<HTMLButtonElement>('[data-connection-choice]')].find((item) => item.textContent.includes('Alpha.member1'))!.click(); await settle();
+    expect(host.querySelector('[data-member="m1"]')).not.toBeNull();
+    expect(host.querySelector('[data-code-card]')).toBeNull();
+    expect(host.querySelectorAll('.svelte-flow__node-symbol')).toHaveLength(2);
+    await vi.waitFor(() => expect(arrow()).not.toBeNull());
+    arrow().dispatchEvent(new MouseEvent('click', { bubbles: true })); await settle(); await click('Go to target');
+    expect(host.querySelector('[data-code-card]')).toBeNull();
+    expect(host.querySelector('.svelte-flow__node-symbol[data-id="b"]')?.classList.contains('selected')).toBe(true);
+    expect(document.activeElement).toBe(host.querySelector('.svelte-flow__node-symbol[data-id="b"]'));
+  });
+
   it('does not turn ancestor-only or drifted class source facts into inline Detach actions', async () => {
     const recipe = legacyDetachedBoard(); recipe.cards = recipe.cards.slice(0, 1); recipe.symbols = recipe.symbols.slice(0, 1);
     records.get('a')!.document = recipe;
@@ -633,7 +831,7 @@ describe('Board relationship rendering', () => {
     await vi.waitFor(() => expect(port(targetCard, 'incoming')?.dataset.offscreen).toBeUndefined());
     expect(host.querySelectorAll('.svelte-flow__node-symbol')).toHaveLength(2);
   });
-  it('compares unloaded member endpoints discovered only through source-card arrows without pinning them', async () => {
+  it('compares source-only member endpoints by reusing their containing class cards without detaching or pinning them', async () => {
     vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(286);
     vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(160);
     const beta = { ...b, kind: 'class', endLine: 100 };
@@ -650,10 +848,11 @@ describe('Board relationship rendering', () => {
     let arrow: Element | undefined;
     await vi.waitFor(() => { arrow = [...host.querySelectorAll('.svelte-flow__edge')].find((item) => item.getAttribute('data-id')?.startsWith('source-relation:')); expect(arrow).toBeDefined(); });
     arrow!.dispatchEvent(new MouseEvent('click', { bubbles: true })); await settle();
-    await click('Compare source ↗');
-    expect(host.querySelectorAll('[data-code-card]')).toHaveLength(4);
-    expect(host.querySelector('[data-code-card="m0"]')).not.toBeNull();
-    expect(host.querySelector('[data-code-card="betaMethod"]')).not.toBeNull();
+    await click('Inspect evidence'); await click('Compare source ↗');
+    expect(host.querySelectorAll('[data-code-card]')).toHaveLength(2);
+    expect(host.querySelector('[data-code-card="m0"]')).toBeNull();
+    expect(host.querySelector('[data-code-card="betaMethod"]')).toBeNull();
+    expect(host.querySelector('[data-source-fold]')).toBeNull();
     expect(host.querySelectorAll('.svelte-flow__node-symbol')).toHaveLength(0);
   });
   it('draws a separate source-only layer, excludes module/header edges, and drops it for drifted bytes', async () => {
