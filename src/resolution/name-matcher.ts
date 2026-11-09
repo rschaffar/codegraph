@@ -23725,8 +23725,9 @@ export function inferLocalReceiverType(
     // pure waste — skip it rather than scan it.
     if (line.length > 10_000) return null;
     const input = `${scanReceiver}\0${line}`;
-    for (const [patternIndex, re] of (i >= ownFrom ? withListed : patterns).entries()) {
-      const m = re.exec(input);
+    const linePatterns = i >= ownFrom ? withListed : patterns;
+    for (let patternIndex = 0; patternIndex < linePatterns.length; patternIndex++) {
+      const m = linePatterns[patternIndex]!.exec(input);
       if (m && m[2]) {
         let type = ref.language === 'java' ? javaTypeName(m[2]) : normalizeInferredTypeName(m[2]);
         // Delphi dereferences a pointer for a member (`P.Method` is
@@ -23737,8 +23738,11 @@ export function inferLocalReceiverType(
           // Shared patterns match name\0line from offset zero. Only C# needs
           // the selected declaration's column: recover it with the same raw
           // pattern, rather than mistaking the synthetic prefix for source.
-          if (decl && ref.language === 'csharp') {
-            lastColumn = localReceiverTypePatterns('csharp', escapedReceiver)[patternIndex]?.exec(line)?.index;
+          if (ref.language === 'csharp') {
+            const selected = localReceiverTypePatterns('csharp', escapedReceiver)[patternIndex]?.exec(line);
+            // Cache provenance even when this caller doesn't request it: a
+            // later span call can reuse the same receiver scan state.
+            lastColumn = selected?.[1] === m[2] ? selected.index : undefined;
           }
           return type;
         }
